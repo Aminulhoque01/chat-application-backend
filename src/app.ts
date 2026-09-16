@@ -6,6 +6,7 @@ import userRouter from "./module/user/user.route";
 import conversationRouter from "./module/conversation/conversation.route";
 import messageRouter from "./module/message/message.route";
 import notificationRouter from "./module/notification/notification.route";
+import blockRouter from "./module/block/block.route";
 
 const app = express();
 
@@ -29,6 +30,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/api/user", userRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/block", blockRouter);
 app.use("/api/conversation", conversationRouter);
 app.use("/api/message", messageRouter);
 app.use("api/notifications", notificationRouter);

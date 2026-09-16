@@ -385,5 +385,80 @@ export const updateAvatar = async (
   }
 };
 
+ 
+export const getUserByIdController =
+  async (
+    req: AuthRequest,
+    res: Response,
+  ) => {
+    try {
+      const {
+        id: userId,
+      } = req.params;
+
+      /**
+       * ======================================
+       * Validate target user ID
+       * ======================================
+       */
+      if (
+        !mongoose.Types.ObjectId.isValid(
+          userId as string,
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid user ID",
+        });
+      }
+
+      /**
+       * ======================================
+       * Current logged-in user
+       * ======================================
+       */
+      const viewerUserId =
+        req.user?.userId;
+
+      /**
+       * ======================================
+       * Get block-aware profile
+       * ======================================
+       */
+      const user =
+        await getUserById(
+          userId as string,
+          viewerUserId,
+        );
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "User not found",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: user,
+      });
+    } catch (error) {
+      console.error(
+        "Get user by ID error:",
+        error,
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Failed to get user",
+      });
+    }
+  };
+ 
 
  

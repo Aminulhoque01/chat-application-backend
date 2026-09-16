@@ -1,12 +1,12 @@
 import { Router } from "express";
 
 import {
-  blockStatus,
-  blockUserController,
+ 
   getAllUser,
+  getUserByIdController,
   getUserProfile,
   searchUser,
-  unblockUserController,
+   
   updateAvatar,
   updateProfile,
 } from "./user.controller";
@@ -88,25 +88,8 @@ userRouter.patch(
  */
 userRouter.get(
   "/:id",
-  getUserProfile,
+  getUserByIdController,
 );
 
-userRouter.post(
-  "/:id/block",
-  authMiddleware,
-  blockUserController,
-);
-
-userRouter.delete(
-  "/:id/block",
-  authMiddleware,
-  unblockUserController,
-);
-
-userRouter.get(
-  "/:id/block-status",
-  authMiddleware,
-  blockStatus,
-);
-
+ 
 export default userRouter;
