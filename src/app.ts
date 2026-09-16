@@ -31,6 +31,6 @@ app.use("/api/user", userRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/conversation", conversationRouter);
 app.use("/api/message", messageRouter);
-app.use("/notifications", notificationRouter);
+app.use("api/notifications", notificationRouter);
 
 export default app;

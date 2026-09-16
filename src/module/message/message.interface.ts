@@ -1,10 +1,6 @@
 import { Types } from "mongoose";
 
-export type AttachmentType =
-  | "image"
-  | "video"
-  | "file"
-  | "audio";
+export type AttachmentType = "image" | "video" | "file" | "audio";
 
 export interface IAttachment {
   type: AttachmentType;
@@ -48,4 +44,8 @@ export interface IMessage {
   reactions: IMessageReaction[];
 
   replyTo?: Types.ObjectId | null;
+
+  isForwarded?: boolean;
+
+  forwardedFrom?: Types.ObjectId | null;
 }

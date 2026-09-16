@@ -119,6 +119,17 @@ const messageSchema = new Schema<IMessage>(
       ref: "Message",
       default: null,
     },
+
+    isForwarded: {
+      type: Boolean,
+      default: false,
+    },
+
+    forwardedFrom: {
+      type: Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -132,35 +143,20 @@ const messageSchema = new Schema<IMessage>(
   OR
   - attachment
 */
-messageSchema.pre(
-  "validate",
-  function (next) {
-    
-    if (this.isDeleted) {
-      return next();
-    }
+messageSchema.pre("validate", function (next) {
+  if (this.isDeleted) {
+    return next();
+  }
 
-    const hasText =
-      typeof this.text === "string" &&
-      this.text.trim().length > 0;
+  const hasText = typeof this.text === "string" && this.text.trim().length > 0;
 
-    const hasAttachments =
-      this.attachments &&
-      this.attachments.length > 0;
+  const hasAttachments = this.attachments && this.attachments.length > 0;
 
-    if (
-      !hasText &&
-      !hasAttachments
-    ) {
-      return next(
-        new Error(
-          "Message must contain text or attachment",
-        ),
-      );
-    }
+  if (!hasText && !hasAttachments) {
+    return next(new Error("Message must contain text or attachment"));
+  }
 
-    next();
-  },
-);
+  next();
+});
 
 export const MessageModel = model<IMessage>("Message", messageSchema);

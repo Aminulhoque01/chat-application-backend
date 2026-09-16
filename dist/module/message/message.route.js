@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const auth_middleware_1 = require("../../middleware/auth.middleware");
+const message_controller_1 = require("./message.controller");
+const messageUpload_middleware_1 = require("../../middleware/messageUpload.middleware");
+const messageRouter = (0, express_1.Router)();
+messageRouter.post("/", auth_middleware_1.authMiddleware, messageUpload_middleware_1.uploadMessageFiles.array("attachments", 10), message_controller_1.sendMessage);
+messageRouter.get("/:id/messages", auth_middleware_1.authMiddleware, message_controller_1.getMessages);
+messageRouter.patch("/:id/read", auth_middleware_1.authMiddleware, message_controller_1.markMessageAsReadController);
+messageRouter.patch("/:id", auth_middleware_1.authMiddleware, message_controller_1.updateMessage);
+messageRouter.delete("/:id", auth_middleware_1.authMiddleware, message_controller_1.deleteMessageController);
+messageRouter.post("/:messageId/reactions", auth_middleware_1.authMiddleware, message_controller_1.addReactionController);
+exports.default = messageRouter;

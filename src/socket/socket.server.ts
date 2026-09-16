@@ -47,13 +47,47 @@ export const createSocketServer = (
   io.use(socketAuth);
 
   io.on("connection", (socket) => {
+    const userId = socket.data.userId;
+
     console.log(
       `Socket connected: ${socket.id}`,
-      `userId: ${socket.data.userId}`,
+      `userId: ${userId}`,
     );
 
+    /**
+     * --------------------------------------------------
+     * PRIVATE USER ROOM
+     * --------------------------------------------------
+     *
+     * Every authenticated socket joins its own
+     * private room.
+     *
+     * This allows the server to send events to a user
+     * even when that user is NOT currently viewing
+     * a specific conversation.
+     *
+     * Example:
+     * user:64f123...
+     */
+    const userRoom = `user:${userId}`;
+
+    socket.join(userRoom);
+
+    console.log(
+      `User ${userId} joined personal room ${userRoom}`,
+    );
+
+    /**
+     * Register message, typing, reaction,
+     * delivery, read, etc. handlers.
+     */
     registerSocketHandlers(io, socket);
 
+    /**
+     * --------------------------------------------------
+     * CONVERSATION JOIN
+     * --------------------------------------------------
+     */
     socket.on(
       "conversation:join",
       async ({ conversationId }) => {
@@ -69,9 +103,6 @@ export const createSocketServer = (
 
             return;
           }
-
-          const userId =
-            socket.data.userId;
 
           const isMember =
             await isConversationMember(
@@ -123,6 +154,11 @@ export const createSocketServer = (
       },
     );
 
+    /**
+     * --------------------------------------------------
+     * CONVERSATION LEAVE
+     * --------------------------------------------------
+     */
     socket.on(
       "conversation:leave",
       async ({ conversationId }) => {
@@ -151,7 +187,7 @@ export const createSocketServer = (
           );
 
           console.log(
-            `User ${socket.data.userId} left conversation ${conversationId}`,
+            `User ${userId} left conversation ${conversationId}`,
           );
         } catch (error) {
           console.error(
@@ -169,6 +205,24 @@ export const createSocketServer = (
         }
       },
     );
+
+    /**
+     * --------------------------------------------------
+     * DISCONNECT
+     * --------------------------------------------------
+     *
+     * Socket.IO automatically removes the socket
+     * from all rooms when disconnected.
+     *
+     * Personal room therefore needs no manual leave.
+     */
+    socket.on("disconnect", (reason) => {
+      console.log(
+        `Socket disconnected: ${socket.id}`,
+        `userId: ${userId}`,
+        `reason: ${reason}`,
+      );
+    });
   });
 
   return io;

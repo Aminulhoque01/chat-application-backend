@@ -2,15 +2,19 @@ import { Request, Response } from "express";
 import mongoose from "mongoose";
 
 import {
+ 
   getAllUsers,
+ 
   getUserById,
   GetUsersQuery,
   searchUsers,
+   
   updateUserAvatar,
   updateUserProfile,
 } from "./user.service";
 
 import { uploadToCloudinary } from "../../utils/cloudinary";
+import { AuthRequest } from "../../middleware/auth.middleware";
 
 /**
  * Get all users
@@ -380,3 +384,6 @@ export const updateAvatar = async (
     });
   }
 };
+
+
+ 

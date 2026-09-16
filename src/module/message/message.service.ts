@@ -10,6 +10,176 @@ import { UserModel } from "../user/user.model";
 import { sendPushNotification } from "../notification/notification.service";
 import { IUser } from "../user/user.interface";
 
+// export const createMessage = async (
+//   currentUserId: string,
+//   conversationId: string,
+//   text = "",
+//   replyTo?: string,
+//   attachments: IAttachment[] = [],
+// ) => {
+//   // 1. Validate current user ID
+//   if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
+//     throw new Error("Invalid current user ID");
+//   }
+
+//   // 2. Validate conversation ID
+//   if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+//     throw new Error("Invalid conversation ID");
+//   }
+
+//   // 3. Validate message content
+//   const trimmedText = text.trim();
+
+//   if (!trimmedText && attachments.length === 0) {
+//     throw new Error("Message must contain text or attachment");
+//   }
+
+//   // 4. Find conversation and make sure
+//   // current user is a participant
+//   const conversation = await ConversationModel.findOne({
+//     _id: new mongoose.Types.ObjectId(conversationId),
+
+//     participants: new mongoose.Types.ObjectId(currentUserId),
+//   });
+
+//   if (!conversation) {
+//     throw new Error("Conversation not found or you are not a member");
+//   }
+
+//   // 5. Validate reply message
+//   if (replyTo) {
+//     if (!mongoose.Types.ObjectId.isValid(replyTo)) {
+//       throw new Error("Invalid reply message ID");
+//     }
+
+//     const replyMessage = await MessageModel.findById(replyTo);
+
+//     if (!replyMessage) {
+//       throw new Error("Reply message not found");
+//     }
+
+//     if (replyMessage.conversationId.toString() !== conversationId) {
+//       throw new Error("Reply message belongs to another conversation");
+//     }
+//   }
+
+//   // 6. Create message
+//   const message = await MessageModel.create({
+//     conversationId: new mongoose.Types.ObjectId(conversationId),
+
+//     senderId: new mongoose.Types.ObjectId(currentUserId),
+
+//     // Can be empty for file/media-only messages
+//     text: trimmedText,
+
+//     // Attachment support
+//     attachments,
+
+//     // Reply support
+//     replyTo: replyTo ? new mongoose.Types.ObjectId(replyTo) : null,
+//   });
+
+//   // 7. Update conversation lastMessage
+//   conversation.lastMessage = message._id;
+
+//   await conversation.save();
+
+//   // ==========================================
+//   // Invalidate Redis conversation cache
+//   // for all conversation participants
+//   // ==========================================
+
+//   await invalidateUserConversationsCache(
+//     conversation.participants.map((participantId) => participantId.toString()),
+//   );
+
+//   // 8. Populate sender
+//   await message.populate("senderId", "phone name avatar bio isOnline lastSeen");
+
+//   // 9. Populate reply message
+//   await message.populate({
+//     path: "replyTo",
+
+//     select: "text senderId isDeleted createdAt attachments",
+
+//     populate: {
+//       path: "senderId",
+
+//       select: "name avatar",
+//     },
+//   });
+
+//   // 10. Get recipient IDs
+
+//   const recipientIds = conversation.participants
+//     .map((participantId) => participantId.toString())
+//     .filter((participantId) => participantId !== currentUserId);
+
+//   // 11. Get recipients with push tokens
+//   const recipients = await UserModel.find({
+//     _id: {
+//       $in: recipientIds,
+//     },
+
+//     "pushTokens.0": {
+//       $exists: true,
+//     },
+//   }).select("pushTokens");
+
+//   // 12. Collect all FCM tokens
+//   const tokens = recipients.flatMap((user) =>
+//     user.pushTokens.map((item) => item.token),
+//   );
+
+//   // 13. Prepare notification body
+//   let notificationBody = trimmedText;
+
+//   if (!notificationBody && attachments.length > 0) {
+//     const firstAttachment = attachments[0];
+
+//     switch (firstAttachment.type) {
+//       case "image":
+//         notificationBody = "📷 Sent an image";
+//         break;
+
+//       case "video":
+//         notificationBody = "🎥 Sent a video";
+//         break;
+
+//       case "audio":
+//         notificationBody = "🎤 Sent a voice message";
+//         break;
+
+//       default:
+//         notificationBody = "📎 Sent a file";
+//     }
+//   }
+
+//   // 14. Send push notification
+
+//   const sender = message.senderId as unknown as IUser;
+
+//   if (tokens.length > 0) {
+//     void sendPushNotification({
+//       tokens,
+
+//       title: sender.name,
+
+//       body: notificationBody,
+
+//       data: {
+//         type: "new_message",
+
+//         conversationId: conversationId,
+
+//         messageId: message._id.toString(),
+//       },
+//     });
+//   }
+
+//   return message;
+// };
+
 export const createMessage = async (
   currentUserId: string,
   conversationId: string,
@@ -17,25 +187,37 @@ export const createMessage = async (
   replyTo?: string,
   attachments: IAttachment[] = [],
 ) => {
+  // ==========================================
   // 1. Validate current user ID
+  // ==========================================
+
   if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
+  // ==========================================
   // 2. Validate conversation ID
+  // ==========================================
+
   if (!mongoose.Types.ObjectId.isValid(conversationId)) {
     throw new Error("Invalid conversation ID");
   }
 
+  // ==========================================
   // 3. Validate message content
+  // ==========================================
+
   const trimmedText = text.trim();
 
   if (!trimmedText && attachments.length === 0) {
     throw new Error("Message must contain text or attachment");
   }
 
-  // 4. Find conversation and make sure
-  // current user is a participant
+  // ==========================================
+  // 4. Find conversation
+  //    Make sure current user is a participant
+  // ==========================================
+
   const conversation = await ConversationModel.findOne({
     _id: new mongoose.Types.ObjectId(conversationId),
 
@@ -46,7 +228,77 @@ export const createMessage = async (
     throw new Error("Conversation not found or you are not a member");
   }
 
-  // 5. Validate reply message
+  // ==========================================
+  // 5. Check block status
+  //
+  // Only apply blocking rules to DIRECT chats.
+  //
+  // If:
+  // A blocks B
+  // OR
+  // B blocks A
+  //
+  // Then neither user can send a message.
+  // ==========================================
+
+  if (conversation.type === "direct") {
+    const otherParticipantId = conversation.participants.find(
+      (participantId) => participantId.toString() !== currentUserId,
+    );
+
+    if (!otherParticipantId) {
+      throw new Error("Direct conversation participant not found");
+    }
+
+    const otherUser =
+      await UserModel.findById(otherParticipantId).select("_id blockedUsers");
+
+    if (!otherUser) {
+      throw new Error("Other user not found");
+    }
+
+    const currentUser =
+      await UserModel.findById(currentUserId).select("_id blockedUsers");
+
+    if (!currentUser) {
+      throw new Error("Current user not found");
+    }
+
+    // ------------------------------------------
+    // Check:
+    // Current user blocked the other user
+    // ------------------------------------------
+
+    const currentUserBlockedOther = currentUser.blockedUsers.some(
+      (blockedUserId) =>
+        blockedUserId.toString() === otherParticipantId.toString(),
+    );
+
+
+    // ------------------------------------------
+    // Check:
+    // Other user blocked the current user
+    // ------------------------------------------
+
+    const otherUserBlockedCurrent = otherUser.blockedUsers.some(
+      (blockedUserId) => blockedUserId.toString() === currentUserId,
+    );
+    
+    
+
+    // ------------------------------------------
+    // Block messaging if either side blocked
+    // ------------------------------------------
+
+    if (currentUserBlockedOther || otherUserBlockedCurrent) {
+      throw new Error("You cannot send messages because this user is blocked");
+    }
+  }
+
+  // ==========================================
+  // 6. Validate reply message
+  // ==========================================
+
   if (replyTo) {
     if (!mongoose.Types.ObjectId.isValid(replyTo)) {
       throw new Error("Invalid reply message ID");
@@ -63,7 +315,10 @@ export const createMessage = async (
     }
   }
 
-  // 6. Create message
+  // ==========================================
+  // 7. Create message
+  // ==========================================
+
   const message = await MessageModel.create({
     conversationId: new mongoose.Types.ObjectId(conversationId),
 
@@ -72,31 +327,40 @@ export const createMessage = async (
     // Can be empty for file/media-only messages
     text: trimmedText,
 
-    // Attachment support
+    // Attachments
     attachments,
 
     // Reply support
     replyTo: replyTo ? new mongoose.Types.ObjectId(replyTo) : null,
   });
 
-  // 7. Update conversation lastMessage
+  // ==========================================
+  // 8. Update conversation lastMessage
+  // ==========================================
+
   conversation.lastMessage = message._id;
 
   await conversation.save();
 
   // ==========================================
-  // Invalidate Redis conversation cache
-  // for all conversation participants
+  // 9. Invalidate Redis conversation cache
+  //    for all conversation participants
   // ==========================================
 
   await invalidateUserConversationsCache(
     conversation.participants.map((participantId) => participantId.toString()),
   );
 
-  // 8. Populate sender
+  // ==========================================
+  // 10. Populate sender
+  // ==========================================
+
   await message.populate("senderId", "phone name avatar bio isOnline lastSeen");
 
-  // 9. Populate reply message
+  // ==========================================
+  // 11. Populate reply message
+  // ==========================================
+
   await message.populate({
     path: "replyTo",
 
@@ -109,81 +373,68 @@ export const createMessage = async (
     },
   });
 
-    // 10. Get recipient IDs
+  // ==========================================
+  // 12. Get recipient IDs
+  // ==========================================
 
-   
-  const recipientIds =
-    conversation.participants
-      .map(
-        (participantId) =>
-          participantId.toString(),
-      )
-      .filter(
-        (participantId) =>
-          participantId !== currentUserId,
-      );
+  const recipientIds = conversation.participants
+    .map((participantId) => participantId.toString())
+    .filter((participantId) => participantId !== currentUserId);
 
-  // 11. Get recipients with push tokens
-  const recipients =
-    await UserModel.find({
-      _id: {
-        $in: recipientIds,
-      },
+  // ==========================================
+  // 13. Get recipients with push tokens
+  // ==========================================
 
-      "pushTokens.0": {
-        $exists: true,
-      },
-    }).select(
-      "pushTokens",
-    );
+  const recipients = await UserModel.find({
+    _id: {
+      $in: recipientIds,
+    },
 
-  // 12. Collect all FCM tokens
-  const tokens =
-    recipients.flatMap(
-      (user) =>
-        user.pushTokens.map(
-          (item) => item.token,
-        ),
-    );
+    "pushTokens.0": {
+      $exists: true,
+    },
+  }).select("pushTokens");
 
-  // 13. Prepare notification body
-  let notificationBody =
-    trimmedText;
+  // ==========================================
+  // 14. Collect all FCM tokens
+  // ==========================================
 
-  if (
-    !notificationBody &&
-    attachments.length > 0
-  ) {
-    const firstAttachment =
-      attachments[0];
+  const tokens = recipients.flatMap((user) =>
+    user.pushTokens.map((item) => item.token),
+  );
 
-    switch (
-      firstAttachment.type
-    ) {
+  // ==========================================
+  // 15. Prepare notification body
+  // ==========================================
+
+  let notificationBody = trimmedText;
+
+  if (!notificationBody && attachments.length > 0) {
+    const firstAttachment = attachments[0];
+
+    switch (firstAttachment.type) {
       case "image":
-        notificationBody =
-          "📷 Sent an image";
+        notificationBody = "📷 Sent an image";
         break;
 
       case "video":
-        notificationBody =
-          "🎥 Sent a video";
+        notificationBody = "🎥 Sent a video";
         break;
 
       case "audio":
-        notificationBody =
-          "🎤 Sent a voice message";
+        notificationBody = "🎤 Sent a voice message";
         break;
 
       default:
-        notificationBody =
-          "📎 Sent a file";
+        notificationBody = "📎 Sent a file";
     }
   }
 
-  // 14. Send push notification
+  // ==========================================
+  // 16. Send push notification
+  // ==========================================
 
-  const sender =message.senderId as unknown as IUser;
+  const sender = message.senderId as unknown as IUser;
 
   if (tokens.length > 0) {
     void sendPushNotification({
@@ -191,20 +442,21 @@ export const createMessage = async (
 
       title: sender.name,
 
-      body:
-        notificationBody,
+      body: notificationBody,
 
       data: {
         type: "new_message",
 
-        conversationId:
-          conversationId,
+        conversationId: conversationId,
 
-        messageId:
-          message._id.toString(),
+        messageId: message._id.toString(),
       },
     });
   }
+
+  // ==========================================
+  // 17. Return message
+  // ==========================================
 
   return message;
 };
@@ -308,7 +560,6 @@ export const markMessageAsDelivered = async (
   // 4. Verify user is a conversation member
   const conversation = await ConversationModel.findOne({
     _id: message.conversationId,
-
     participants: new mongoose.Types.ObjectId(currentUserId),
   }).select("_id");
 
@@ -329,10 +580,12 @@ export const markMessageAsDelivered = async (
     },
   );
 
+  // 6. Return delivery information
   return {
-    messageId,
+    messageId: message._id.toString(),
     conversationId: message.conversationId.toString(),
     userId: currentUserId,
+    senderId: message.senderId.toString(),
   };
 };
 
@@ -342,50 +595,37 @@ export const markMessageAsRead = async (
 ) => {
   // existing validation...
 
-  const message =
-    await MessageModel.findById(messageId);
+  const message = await MessageModel.findById(messageId);
 
   if (!message) {
     throw new Error("Message not found");
   }
 
   // Already read
-  const alreadyRead =
-    message.readBy.some(
-      (userId) =>
-        userId.toString() ===
-        currentUserId,
-    );
+  const alreadyRead = message.readBy.some(
+    (userId) => userId.toString() === currentUserId,
+  );
 
   if (!alreadyRead) {
-    message.readBy.push(
-      new mongoose.Types.ObjectId(
-        currentUserId,
-      ),
-    );
+    message.readBy.push(new mongoose.Types.ObjectId(currentUserId));
 
     await message.save();
   }
 
   // IMPORTANT: both users' conversation cache invalidate
-  const conversation =
-    await ConversationModel.findById(
-      message.conversationId,
-    ).select("participants");
+  const conversation = await ConversationModel.findById(
+    message.conversationId,
+  ).select("participants");
 
   if (conversation) {
     await invalidateUserConversationsCache(
-      conversation.participants.map(
-        (participantId) =>
-          participantId.toString(),
+      conversation.participants.map((participantId) =>
+        participantId.toString(),
       ),
     );
   }
 
-  await message.populate(
-    "readBy",
-    "phone name avatar",
-  );
+  await message.populate("readBy", "phone name avatar");
 
   return message;
 };
@@ -395,42 +635,47 @@ export const editMessage = async (
   messageId: string,
   text: string,
 ) => {
-  // 1. Validate IDs
+  // 1. Validate current user ID
   if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
+  // 2. Validate message ID
   if (!mongoose.Types.ObjectId.isValid(messageId)) {
     throw new Error("Invalid message ID");
   }
 
-  // 2. Find message
+  // 3. Find message
   const message = await MessageModel.findById(messageId);
 
   if (!message) {
     throw new Error("Message not found");
   }
 
-  // 3. Only sender can edit
+  // 4. Only sender can edit
   if (message.senderId.toString() !== currentUserId) {
     throw new Error("You can only edit your own message");
   }
 
-  // 4. Validate text
+  // 5. Cannot edit deleted message
+  if (message.isDeleted) {
+    throw new Error("Cannot edit a deleted message");
+  }
+
+  // 6. Validate text
   const trimmedText = text.trim();
 
   if (!trimmedText) {
     throw new Error("Message text cannot be empty");
   }
 
-  // 5. Edit
+  // 7. Update message
   message.text = trimmedText;
-
   message.isEdited = true;
 
   await message.save();
 
-  // 6. Populate sender
+  // 8. Populate sender
   await message.populate("senderId", "phone name avatar bio isOnline lastSeen");
 
   return message;
@@ -500,29 +745,61 @@ export const deleteMessage = async (
   };
 };
 
-const getReactionSummary = (reactions: IMessageReaction[]) => {
+const getReactionSummary = async (reactions: IMessageReaction[]) => {
+  const userIds = [
+    ...new Set(reactions.map((reaction) => reaction.userId.toString())),
+  ];
+
+  const users = await UserModel.find({
+    _id: {
+      $in: userIds,
+    },
+  }).select("_id name");
+
+  const userMap = new Map(
+    users.map((user) => [user._id.toString(), user.name]),
+  );
+
   const reactionMap = new Map<
     string,
     {
       emoji: string;
       count: number;
-      userIds: string[];
+      users: {
+        userId: string;
+        name: string;
+      }[];
     }
   >();
 
   for (const reaction of reactions) {
     const emoji = reaction.emoji;
 
+    const userId = reaction.userId.toString();
+
+    const name = userMap.get(userId) ?? "Unknown User";
+
     const existing = reactionMap.get(emoji);
 
     if (existing) {
       existing.count += 1;
-      existing.userIds.push(reaction.userId.toString());
+
+      existing.users.push({
+        userId,
+        name,
+      });
     } else {
       reactionMap.set(emoji, {
         emoji,
+
         count: 1,
-        userIds: [reaction.userId.toString()],
+
+        users: [
+          {
+            userId,
+            name,
+          },
+        ],
       });
     }
   }
@@ -576,7 +853,7 @@ export const addReaction = async (
     return {
       action: "removed" as const,
       message,
-      reactionSummary: getReactionSummary(message.reactions),
+      reactionSummary: await getReactionSummary(message.reactions),
     };
   }
 
@@ -592,6 +869,6 @@ export const addReaction = async (
   return {
     action: "added" as const,
     message,
-    reactionSummary: getReactionSummary(message.reactions),
+    reactionSummary: await getReactionSummary(message.reactions),
   };
 };

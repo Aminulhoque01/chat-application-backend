@@ -1,5 +1,8 @@
-node_modules
+node_modules/
 .env
 
 # Firebase secret
-src/config/firebase-service-account.json
+**/firebase-service-account.json
+
+# Build output
+dist/

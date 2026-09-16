@@ -24,6 +24,7 @@ export interface IUser extends Document {
   lastSeen?: Date | null;
 
   pushTokens: IPushToken[];
+  blockedUsers: Types.ObjectId[];
 
   createdAt: Date;
 

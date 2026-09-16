@@ -1,32 +1,28 @@
 import { Schema, model } from "mongoose";
 
-import {
-  IPushToken,
-  IUser,
-} from "./user.interface";
+import { IPushToken, IUser } from "./user.interface";
 
-const pushTokenSchema =
-  new Schema<IPushToken>(
-    {
-      token: {
-        type: String,
-        required: true,
-      },
-
-      device: {
-        type: String,
-        default: "web",
-      },
-
-      createdAt: {
-        type: Date,
-        default: Date.now,
-      },
+const pushTokenSchema = new Schema<IPushToken>(
+  {
+    token: {
+      type: String,
+      required: true,
     },
-    {
-      _id: false,
+
+    device: {
+      type: String,
+      default: "web",
     },
-  );
+
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  {
+    _id: false,
+  },
+);
 
 const userSchema = new Schema<IUser>(
   {
@@ -75,6 +71,16 @@ const userSchema = new Schema<IUser>(
 
       default: [],
     },
+
+    blockedUsers: {
+      type: [
+        {
+          type: Schema.Types.ObjectId,
+          ref: "User",
+        },
+      ],
+      default: [],
+    },
   },
   {
     timestamps: true,
@@ -83,8 +89,4 @@ const userSchema = new Schema<IUser>(
   },
 );
 
-export const UserModel =
-  model<IUser>(
-    "User",
-    userSchema,
-  );
+export const UserModel = model<IUser>("User", userSchema);

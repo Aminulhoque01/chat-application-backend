@@ -14,6 +14,7 @@ import {
 } from "../module/message/message.service";
 
 import { isConversationMember } from "../module/conversation/conversation.service";
+import { ConversationModel } from "../module/conversation/conversation.model";
 
 export const registerSocketHandlers = (
   io: Server,
@@ -37,46 +38,176 @@ export const registerSocketHandlers = (
   // Send Message
   // ==========================================
 
-  socket.on(
-    "message:send",
-    async (payload: {
-      conversationId: string;
-      text?: string;
-      replyTo?: string;
-    }) => {
-      try {
-        const { conversationId, text = "", replyTo } = payload;
+  // socket.on(
+  //   "message:send",
+  //   async (payload: {
+  //     conversationId: string;
+  //     text?: string;
+  //     replyTo?: string;
+  //   }) => {
+  //     try {
+  //       const { conversationId, text = "", replyTo } = payload;
 
-        if (!conversationId) {
-          socket.emit("message:error", {
-            message: "Conversation ID is required",
-          });
+  //       if (!conversationId) {
+  //         socket.emit("message:error", {
+  //           message: "Conversation ID is required",
+  //         });
 
-          return;
-        }
+  //         return;
+  //       }
 
-        const message = await createMessage(
-          socket.data.userId,
-          conversationId,
-          text,
+  //       // --------------------------------------
+  //       // Check conversation membership
+  //       // --------------------------------------
 
-          replyTo,
-          [], // attachments empty for socket
-        );
+  //       const isMember = await isConversationMember(conversationId, userId);
 
-        io.to(conversationId).emit("message:new", message);
+  //       if (!isMember) {
+  //         socket.emit("message:error", {
+  //           message: "You are not a member of this conversation",
+  //         });
 
-        console.log(`Message ${message._id} sent to room ${conversationId}`);
-      } catch (error) {
-        console.error("message:send error:", error);
+  //         return;
+  //       }
 
+  //       // --------------------------------------
+  //       // Create message
+  //       // --------------------------------------
+
+  //       const message = await createMessage(
+  //         userId,
+  //         conversationId,
+  //         text,
+  //         replyTo,
+  //         [],
+  //       );
+
+  //       // --------------------------------------
+  //       // Get conversation participants
+  //       //
+  //       // We need participant IDs so that the
+  //       // message can be delivered to every
+  //       // connected user's personal room.
+  //       // --------------------------------------
+
+  //       const participants =
+  //         message.conversationId &&
+  //         typeof message.conversationId === "object" &&
+  //         "participants" in message.conversationId
+  //           ? (message.conversationId as any).participants
+  //           : null;
+
+  //       if (participants) {
+  //         for (const participant of participants) {
+  //           const participantId =
+  //             typeof participant === "string"
+  //               ? participant
+  //               : participant._id?.toString();
+
+  //           if (!participantId) continue;
+
+  //           io.to(`user:${participantId}`).emit("message:new", message);
+  //         }
+  //       } else {
+  //         /**
+  //          * Fallback:
+  //          *
+  //          * If createMessage() does not return
+  //          * populated conversation participants,
+  //          * at least send the message to the
+  //          * current conversation room.
+  //          *
+  //          * We can remove this fallback later
+  //          * if createMessage always returns
+  //          * populated participants.
+  //          */
+  //         io.to(conversationId).emit("message:new", message);
+  //       }
+
+  //       console.log(
+  //         `Message ${message._id} created in conversation ${conversationId}`,
+  //       );
+  //     } catch (error) {
+  //       console.error("message:send error:", error);
+
+  //       socket.emit("message:error", {
+  //         message:
+  //           error instanceof Error ? error.message : "Failed to send message",
+  //       });
+  //     }
+  //   },
+  // );
+
+  socket.on("message:send", async (payload) => {
+    try {
+      const { conversationId, text = "", replyTo } = payload;
+
+      if (!conversationId) {
         socket.emit("message:error", {
-          message:
-            error instanceof Error ? error.message : "Failed to send message",
+          message: "Conversation ID is required",
         });
+
+        return;
       }
-    },
-  );
+
+      // --------------------------------------
+      // Verify membership
+      // --------------------------------------
+
+      const isMember = await isConversationMember(conversationId, userId);
+
+      if (!isMember) {
+        socket.emit("message:error", {
+          message: "You are not a member of this conversation",
+        });
+
+        return;
+      }
+
+      // --------------------------------------
+      // Create message
+      // --------------------------------------
+
+      const message = await createMessage(
+        userId,
+        conversationId,
+        text,
+        replyTo,
+        [],
+      );
+
+      // --------------------------------------
+      // Get conversation participants
+      // --------------------------------------
+
+      const conversation =
+        await ConversationModel.findById(conversationId).select("participants");
+
+      if (!conversation) {
+        throw new Error("Conversation not found");
+      }
+
+      // --------------------------------------
+      // Send message to every participant's
+      // personal socket room
+      // --------------------------------------
+
+      for (const participantId of conversation.participants) {
+        const participantRoom = `user:${participantId.toString()}`;
+
+        io.to(participantRoom).emit("message:new", message);
+      }
+
+      console.log(`Message ${message._id} delivered to participant rooms`);
+    } catch (error) {
+      console.error("message:send error:", error);
+
+      socket.emit("message:error", {
+        message:
+          error instanceof Error ? error.message : "Failed to send message",
+      });
+    }
+  });
 
   // ==========================================
   // Message Reaction
@@ -85,6 +216,14 @@ export const registerSocketHandlers = (
   socket.on("message:reaction", async (payload) => {
     try {
       const { messageId, emoji } = payload;
+
+      if (!messageId || !emoji) {
+        socket.emit("message:error", {
+          message: "Message ID and emoji are required",
+        });
+
+        return;
+      }
 
       const result = await addReaction(userId, messageId, emoji);
 
@@ -133,10 +272,9 @@ export const registerSocketHandlers = (
 
       const deletedMessage = await deleteMessage(userId, messageId);
 
-      io.to(deletedMessage.conversationId).emit(
-        "message:deleted",
-        deletedMessage,
-      );
+      const conversationId = deletedMessage.conversationId.toString();
+
+      io.to(conversationId).emit("message:deleted", deletedMessage);
 
       console.log(`Message ${messageId} deleted`);
     } catch (error) {
@@ -175,7 +313,11 @@ export const registerSocketHandlers = (
 
       const message = await editMessage(userId, messageId, text);
 
-      io.to(message.conversationId.toString()).emit("message:updated", message);
+      const conversationId = message.conversationId.toString();
+
+      // Send edited message to everyone
+      // inside the conversation room
+      io.to(conversationId).emit("message:edited", message);
 
       console.log(`Message ${message._id} edited`);
     } catch (error) {
@@ -191,13 +333,24 @@ export const registerSocketHandlers = (
   // ==========================================
   // Message Delivered
   // ==========================================
-
   socket.on("message:delivered", async ({ messageId }) => {
     try {
+      if (!messageId) {
+        socket.emit("message:error", {
+          message: "Message ID is required",
+        });
+
+        return;
+      }
+
       const result = await markMessageAsDelivered(userId, messageId);
 
-      io.to(result.conversationId).emit("message:delivery:update", {
+      // Send delivery update to
+      // message sender's personal room
+      io.to(`user:${result.senderId}`).emit("message:delivery:update", {
         messageId: result.messageId,
+
+        conversationId: result.conversationId,
 
         userId: result.userId,
       });
@@ -235,10 +388,22 @@ export const registerSocketHandlers = (
 
       const message = await markMessageAsRead(userId, messageId);
 
-      io.to(message.conversationId.toString()).emit("message:read:update", {
+      const conversationId = message.conversationId.toString();
+
+      /**
+       * Read update should go to the
+       * message sender's personal room.
+       */
+
+      const senderId =
+        typeof message.senderId === "string"
+          ? message.senderId
+          : message.senderId._id.toString();
+
+      io.to(`user:${senderId}`).emit("message:read:update", {
         messageId: message._id.toString(),
 
-        conversationId: message.conversationId.toString(),
+        conversationId,
 
         userId,
       });
@@ -331,7 +496,11 @@ export const registerSocketHandlers = (
   // ==========================================
 
   socket.on("disconnect", (reason) => {
-    console.log(`Socket disconnected: ${socket.id}`, `reason: ${reason}`);
+    console.log(
+      `Socket disconnected: ${socket.id}`,
+      `userId: ${userId}`,
+      `reason: ${reason}`,
+    );
 
     setUserOffline(userId)
       .then(() => {

@@ -17,10 +17,20 @@ import {
 
 import { uploadMultipleMessageFiles } from "./messageUpload.service";
 import { getSocketIO } from "../../socket/socket.instance";
+import { ConversationModel } from "../conversation/conversation.model";
 
-export const sendMessage = async (req: Request, res: Response) => {
+export const sendMessage = async (
+  req: Request,
+  res: Response,
+) => {
+  
   try {
-    const currentUserId = req.user?.userId;
+    // ==========================================
+    // Current User
+    // ==========================================
+
+    const currentUserId =
+      req.user?.userId;
 
     if (!currentUserId) {
       return res.status(401).json({
@@ -29,57 +39,138 @@ export const sendMessage = async (req: Request, res: Response) => {
       });
     }
 
-    // Validate text fields
-    const result = sendMessageSchema.safeParse(req.body ?? {});
+    // ==========================================
+    // Validate Request Body
+    // ==========================================
+
+    const result =
+      sendMessageSchema.safeParse(
+        req.body ?? {},
+      );
 
     if (!result.success) {
       return res.status(400).json({
         success: false,
         message: "Invalid message data",
-
-        errors: result.error.flatten(),
+        errors:
+          result.error.flatten(),
       });
     }
 
-    const { conversationId, text, replyTo } = result.data;
-
-    // Convert req.files safely
-    const files = Array.isArray(req.files) ? req.files : [];
-
-    // Upload files to Cloudinary
-    const attachments =
-      files.length > 0 ? await uploadMultipleMessageFiles(files) : [];
-
-   
-    // Create message
-    const message = await createMessage(
-      currentUserId,
+    const {
       conversationId,
       text,
       replyTo,
-      attachments,
+    } = result.data;
+
+    // ==========================================
+    // Convert Files Safely
+    // ==========================================
+
+    const files = Array.isArray(
+      req.files,
+    )
+      ? req.files
+      : [];
+
+    // ==========================================
+    // Upload Attachments
+    // ==========================================
+
+    const attachments =
+      files.length > 0
+        ? await uploadMultipleMessageFiles(
+            files,
+          )
+        : [];
+
+    // ==========================================
+    // Create Message
+    // ==========================================
+
+    const message =
+      await createMessage(
+        currentUserId,
+        conversationId,
+        text,
+        replyTo,
+        attachments,
+      );
+
+    // ==========================================
+    // Find Conversation Participants
+    // ==========================================
+
+    const conversation =
+      await ConversationModel.findById(
+        conversationId,
+      ).select("participants");
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Conversation not found",
+      });
+    }
+
+    // ==========================================
+    // Realtime Socket Notification
+    // ==========================================
+    //
+   
+    // Do NOT send message:new only to
+    // conversationId room.
+    //
+    // Every participant gets the message
+    // through their own personal room.
+    //
+ 
+   
+    // conversation.
+    // ==========================================
+
+    const io = getSocketIO();
+
+    for (
+      const participantId
+      of conversation.participants
+    ) {
+      const participantRoom =
+        `user:${participantId.toString()}`;
+
+      io.to(
+        participantRoom,
+      ).emit(
+        "message:new",
+        message,
+      );
+    }
+
+    console.log(
+      `REST message ${message._id} sent to personal rooms`,
     );
 
-
-     const io = getSocketIO();
-
-    io.to(conversationId).emit("message:new", message);
-
-     console.log(
-      `REST message ${message._id} sent to room ${conversationId}`,
-    );
-
+    // ==========================================
+    // Response
+    // ==========================================
 
     return res.status(201).json({
       success: true,
-      message: "Message sent successfully",
+      message:
+        "Message sent successfully",
       data: message,
     });
   } catch (error) {
-    console.error("Send message error:", error);
+    console.error(
+      "Send message error:",
+      error,
+    );
 
     const message =
-      error instanceof Error ? error.message : "Failed to send message";
+      error instanceof Error
+        ? error.message
+        : "Failed to send message";
 
     return res.status(400).json({
       success: false,

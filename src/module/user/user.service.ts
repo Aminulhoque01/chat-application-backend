@@ -1,5 +1,6 @@
+import { Types } from "mongoose";
 import { cacheKeys } from "../../cache/cache.keys";
-import { getCache, setCache } from "../../cache/cache.service";
+import { deleteCache, getCache, setCache } from "../../cache/cache.service";
 import { UserModel } from "./user.model";
 
 export interface GetUsersQuery {
@@ -327,3 +328,6 @@ export const setUserOffline =
 
     return user;
   };
+
+
+ 
