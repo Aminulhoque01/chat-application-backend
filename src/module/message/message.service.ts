@@ -1331,6 +1331,11 @@ export const createMessage = async (
  * GET CONVERSATION MESSAGES
  * ============================================================
  */
+/**
+ * ============================================================
+ * GET CONVERSATION MESSAGES
+ * ============================================================
+ */
 export const getConversationMessages = async (
   currentUserId: string,
   conversationId: string,
@@ -1409,15 +1414,49 @@ export const getConversationMessages = async (
           conversationId,
         ),
     })
+
+      // ========================================
+      // Populate message sender
+      // ========================================
+
       .populate(
         "senderId",
         "phone name avatar bio isOnline lastSeen",
       )
+
+      // ========================================
+      // Populate replied message
+      // ========================================
+
+      .populate({
+        path: "replyTo",
+
+        select:
+          "text senderId isDeleted createdAt attachments",
+
+        populate: {
+          path: "senderId",
+
+          select:
+            "name avatar",
+        },
+      })
+
+      // ========================================
+      // Newest → oldest
+      // ========================================
+
       .sort({
         createdAt: -1,
       })
+
       .skip(skip)
+
       .limit(limit),
+
+    // ========================================
+    // Total message count
+    // ========================================
 
     MessageModel.countDocuments({
       conversationId:
@@ -1429,6 +1468,12 @@ export const getConversationMessages = async (
 
   // ==========================================
   // 6. Reverse for chat UI
+  //
+  // DB:
+  // newest → oldest
+  //
+  // UI:
+  // oldest → newest
   // ==========================================
 
   messages.reverse();
@@ -1447,8 +1492,11 @@ export const getConversationMessages = async (
 
     pagination: {
       page,
+
       limit,
+
       total,
+
       totalPages,
 
       hasNextPage:
