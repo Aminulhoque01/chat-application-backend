@@ -11,8 +11,7 @@ import {
   removePushTokenController,
 } from "./notification.controller";
 
-const notificationRouter =
-  Router();
+const notificationRouter =Router();
 
 notificationRouter.post(
   "/token",

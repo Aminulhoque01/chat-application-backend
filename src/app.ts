@@ -33,6 +33,6 @@ app.use("/api/auth", authRouter);
 app.use("/api/block", blockRouter);
 app.use("/api/conversation", conversationRouter);
 app.use("/api/message", messageRouter);
-app.use("api/notifications", notificationRouter);
+app.use("/api/notifications", notificationRouter);
 
 export default app;

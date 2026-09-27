@@ -147,10 +147,7 @@ export const sendMessage = async (
       );
     }
 
-    console.log(
-      `REST message ${message._id} sent to personal rooms`,
-    );
-
+   
     // ==========================================
     // Response
     // ==========================================
@@ -162,10 +159,7 @@ export const sendMessage = async (
       data: message,
     });
   } catch (error) {
-    console.error(
-      "Send message error:",
-      error,
-    );
+     
 
     const message =
       error instanceof Error
@@ -221,7 +215,7 @@ export const getMessages = async (req: Request, res: Response) => {
       data,
     });
   } catch (error) {
-    console.error("Get messages error:", error);
+     
 
     const message =
       error instanceof Error ? error.message : "Failed to fetch messages";
@@ -268,10 +262,7 @@ export const markMessageAsReadController = async (
       data,
     });
   } catch (error) {
-    console.error(
-      "Mark message as read error:",
-      error,
-    );
+    
 
     const message =
       error instanceof Error
@@ -321,7 +312,7 @@ export const updateMessage = async (req: Request, res: Response) => {
       data: message,
     });
   } catch (error) {
-    console.error("Update message error:", error);
+ 
 
     return res.status(400).json({
       success: false,
@@ -359,7 +350,7 @@ export const deleteMessageController = async (req: Request, res: Response) => {
       data,
     });
   } catch (error) {
-    console.error("Delete message error:", error);
+ 
 
     const message =
       error instanceof Error ? error.message : "Failed to delete message";
@@ -397,7 +388,7 @@ export const addReactionController = async (req: Request, res: Response) => {
       },
     });
   } catch (error) {
-    console.error("Add reaction error:", error);
+ 
 
     return res.status(400).json({
       success: false,

@@ -1,4 +1,6 @@
+ 
 import { Server } from "socket.io";
+import { Types } from "mongoose";
 
 import { AuthenticatedSocket } from "./socket.types";
 
@@ -20,7 +22,29 @@ import { isConversationMember } from "../module/conversation/conversation.servic
 import { ConversationModel } from "../module/conversation/conversation.model";
 
 import { BlockModel } from "../module/block/block.model";
-import { Types } from "mongoose";
+
+/**
+ * ============================================================
+ * Populated sender type
+ * ============================================================
+ *
+ * MessageModel senderId is normally an ObjectId.
+ *
+ * But createMessage() populates senderId before returning
+ * the message.
+ *
+ * This type tells TypeScript about the populated structure.
+ * ============================================================
+ */
+interface PopulatedSender {
+  _id: Types.ObjectId;
+  phone: string;
+  name: string;
+  avatar?: string | null;
+  bio?: string | null;
+  isOnline?: boolean;
+  lastSeen?: Date | null;
+}
 
 /**
  * ============================================================
@@ -29,36 +53,37 @@ import { Types } from "mongoose";
  *
  * Block relationship:
  *
- * blockerId = A
- * blockedId = B
+ * A -> B
+ * B -> A
  *
- * But communication is blocked both ways:
+ * Communication is blocked both ways.
  *
- * A -> B ❌
- * B -> A ❌
- *
- * Group conversations are not affected.
+ * Group conversations are NOT affected by block.
  * ============================================================
  */
 const isDirectConversationBlocked = async (
   conversationId: string,
   currentUserId: string,
 ): Promise<boolean> => {
-  // ------------------------------------------
-  // Validate IDs
-  // ------------------------------------------
+  // ==========================================================
+  // Validate conversation ID
+  // ==========================================================
 
   if (!Types.ObjectId.isValid(conversationId)) {
     throw new Error("Invalid conversation ID");
   }
 
+  // ==========================================================
+  // Validate current user ID
+  // ==========================================================
+
   if (!Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  // ------------------------------------------
+  // ==========================================================
   // Find conversation
-  // ------------------------------------------
+  // ==========================================================
 
   const conversation =
     await ConversationModel.findOne({
@@ -67,7 +92,9 @@ const isDirectConversationBlocked = async (
       participants: new Types.ObjectId(
         currentUserId,
       ),
-    }).select("type participants");
+    }).select(
+      "type participants",
+    );
 
   if (!conversation) {
     throw new Error(
@@ -75,19 +102,19 @@ const isDirectConversationBlocked = async (
     );
   }
 
-  // ------------------------------------------
+  // ==========================================================
   // Group conversation
   //
   // Block does not affect group chat.
-  // ------------------------------------------
+  // ==========================================================
 
   if (conversation.type !== "direct") {
     return false;
   }
 
-  // ------------------------------------------
+  // ==========================================================
   // Find other participant
-  // ------------------------------------------
+  // ==========================================================
 
   const otherParticipantId =
     conversation.participants.find(
@@ -102,9 +129,9 @@ const isDirectConversationBlocked = async (
     );
   }
 
-  // ------------------------------------------
-  // Check both directions
-  // ------------------------------------------
+  // ==========================================================
+  // Check both block directions
+  // ==========================================================
 
   const blockExists =
     await BlockModel.exists({
@@ -138,6 +165,11 @@ const isDirectConversationBlocked = async (
   return Boolean(blockExists);
 };
 
+/**
+ * ============================================================
+ * Register Socket Handlers
+ * ============================================================
+ */
 export const registerSocketHandlers = (
   io: Server,
   socket: AuthenticatedSocket,
@@ -176,9 +208,9 @@ export const registerSocketHandlers = (
           replyTo,
         } = payload;
 
-        // ----------------------------------------
+        // ====================================================
         // Validate conversation ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!conversationId) {
           socket.emit(
@@ -192,9 +224,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Check membership
-        // ----------------------------------------
+        // ====================================================
 
         const isMember =
           await isConversationMember(
@@ -214,12 +246,18 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Create message
         //
-        // createMessage() itself checks
-        // block relationship.
-        // ----------------------------------------
+        // createMessage() already handles:
+        //
+        // - conversation validation
+        // - block validation
+        // - reply validation
+        // - sender population
+        // - reply population
+        // - push notification
+        // ====================================================
 
         const message =
           await createMessage(
@@ -230,9 +268,9 @@ export const registerSocketHandlers = (
             [],
           );
 
-        // ----------------------------------------
-        // Get participants
-        // ----------------------------------------
+        // ====================================================
+        // Get conversation participants
+        // ====================================================
 
         const conversation =
           await ConversationModel.findById(
@@ -247,9 +285,70 @@ export const registerSocketHandlers = (
           );
         }
 
-        // ----------------------------------------
-        // Emit to participant personal rooms
-        // ----------------------------------------
+        // ====================================================
+        // Get populated sender
+        //
+        // createMessage() already populated senderId.
+        //
+        // TypeScript still knows senderId as ObjectId,
+        // therefore we explicitly describe the populated
+        // structure here.
+        // ====================================================
+
+        const sender =
+          message.senderId as unknown as
+            PopulatedSender;
+
+        // ====================================================
+        // Convert message to plain object
+        // ====================================================
+
+        const socketMessage =
+          message.toObject();
+
+        // ====================================================
+        // Prepare sender payload
+        //
+        // This is important for frontend notification:
+        //
+        // senderId.name
+        // senderId.avatar
+        // senderId._id
+        // ====================================================
+
+        const populatedSender = {
+          _id:
+            sender._id,
+
+          phone:
+            sender.phone,
+
+          name:
+            sender.name,
+
+          avatar:
+            sender.avatar ?? null,
+
+          bio:
+            sender.bio ?? null,
+
+          isOnline:
+            sender.isOnline ?? false,
+
+          lastSeen:
+            sender.lastSeen ?? null,
+        };
+
+        // ====================================================
+        // Emit message to every participant
+        //
+        // Each participant has their own personal room:
+        //
+        // user:USER_ID
+        //
+        // This allows frontend to decide whether the
+        // notification should be shown.
+        // ====================================================
 
         for (
           const participantId of
@@ -262,7 +361,12 @@ export const registerSocketHandlers = (
             participantRoom,
           ).emit(
             "message:new",
-            message,
+            {
+              ...socketMessage,
+
+              senderId:
+                populatedSender,
+            },
           );
         }
 
@@ -301,9 +405,9 @@ export const registerSocketHandlers = (
           emoji,
         } = payload;
 
-        // ----------------------------------------
+        // ====================================================
         // Validate payload
-        // ----------------------------------------
+        // ====================================================
 
         if (
           !messageId ||
@@ -320,13 +424,15 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
-        // addReaction() already checks:
+        // ====================================================
+        // Add / remove reaction
+        //
+        // addReaction() handles:
         //
         // - membership
         // - deleted message
         // - block relationship
-        // ----------------------------------------
+        // ====================================================
 
         const result =
           await addReaction(
@@ -338,9 +444,9 @@ export const registerSocketHandlers = (
         const conversationId =
           result.message.conversationId.toString();
 
-        // ----------------------------------------
+        // ====================================================
         // Broadcast reaction update
-        // ----------------------------------------
+        // ====================================================
 
         io.to(
           conversationId,
@@ -396,9 +502,9 @@ export const registerSocketHandlers = (
           messageId,
         } = payload;
 
-        // ----------------------------------------
+        // ====================================================
         // Validate message ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!messageId) {
           socket.emit(
@@ -412,11 +518,11 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Delete message
         //
-        // deleteMessage() checks ownership.
-        // ----------------------------------------
+        // deleteMessage() handles ownership.
+        // ====================================================
 
         const deletedMessage =
           await deleteMessage(
@@ -427,9 +533,9 @@ export const registerSocketHandlers = (
         const conversationId =
           deletedMessage.conversationId.toString();
 
-        // ----------------------------------------
+        // ====================================================
         // Broadcast deletion
-        // ----------------------------------------
+        // ====================================================
 
         io.to(
           conversationId,
@@ -473,9 +579,9 @@ export const registerSocketHandlers = (
           text,
         } = payload;
 
-        // ----------------------------------------
+        // ====================================================
         // Validate message ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!messageId) {
           socket.emit(
@@ -489,9 +595,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Validate text
-        // ----------------------------------------
+        // ====================================================
 
         if (
           !text ||
@@ -508,9 +614,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Edit message
-        // ----------------------------------------
+        // ====================================================
 
         const message =
           await editMessage(
@@ -522,9 +628,9 @@ export const registerSocketHandlers = (
         const conversationId =
           message.conversationId.toString();
 
-        // ----------------------------------------
+        // ====================================================
         // Broadcast edited message
-        // ----------------------------------------
+        // ====================================================
 
         io.to(
           conversationId,
@@ -565,9 +671,9 @@ export const registerSocketHandlers = (
       messageId,
     }) => {
       try {
-        // ----------------------------------------
+        // ====================================================
         // Validate message ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!messageId) {
           socket.emit(
@@ -581,10 +687,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
-        // markMessageAsDelivered() checks
-        // block relationship.
-        // ----------------------------------------
+        // ====================================================
+        // Mark message as delivered
+        // ====================================================
 
         const result =
           await markMessageAsDelivered(
@@ -592,10 +697,9 @@ export const registerSocketHandlers = (
             messageId,
           );
 
-        // ----------------------------------------
-        // Send delivery update
-        // to sender's personal room
-        // ----------------------------------------
+        // ====================================================
+        // Notify original sender
+        // ====================================================
 
         io.to(
           `user:${result.senderId}`,
@@ -645,9 +749,9 @@ export const registerSocketHandlers = (
       messageId,
     }) => {
       try {
-        // ----------------------------------------
+        // ====================================================
         // Validate message ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!messageId) {
           socket.emit(
@@ -661,10 +765,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
-        // markMessageAsRead() checks
-        // block relationship.
-        // ----------------------------------------
+        // ====================================================
+        // Mark message as read
+        // ====================================================
 
         const message =
           await markMessageAsRead(
@@ -675,9 +778,9 @@ export const registerSocketHandlers = (
         const conversationId =
           message.conversationId.toString();
 
-        // ----------------------------------------
-        // Find sender
-        // ----------------------------------------
+        // ====================================================
+        // Find sender ID
+        // ====================================================
 
         const senderId =
           typeof message.senderId ===
@@ -685,10 +788,9 @@ export const registerSocketHandlers = (
             ? message.senderId
             : message.senderId._id.toString();
 
-        // ----------------------------------------
-        // Send read update
-        // to sender's personal room
-        // ----------------------------------------
+        // ====================================================
+        // Notify sender
+        // ====================================================
 
         io.to(
           `user:${senderId}`,
@@ -736,9 +838,9 @@ export const registerSocketHandlers = (
       conversationId,
     }) => {
       try {
-        // ----------------------------------------
+        // ====================================================
         // Validate conversation ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!conversationId) {
           socket.emit(
@@ -752,9 +854,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Check membership
-        // ----------------------------------------
+        // ====================================================
 
         const isMember =
           await isConversationMember(
@@ -774,15 +876,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Check block relationship
-        //
-        // Direct chat:
-        // blocked -> no typing event
-        //
-        // Group chat:
-        // block does not affect typing
-        // ----------------------------------------
+        // ====================================================
 
         const blocked =
           await isDirectConversationBlocked(
@@ -794,9 +890,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
-        // Emit typing event
-        // ----------------------------------------
+        // ====================================================
+        // Emit typing start
+        // ====================================================
 
         socket
           .to(conversationId)
@@ -831,9 +927,9 @@ export const registerSocketHandlers = (
       conversationId,
     }) => {
       try {
-        // ----------------------------------------
+        // ====================================================
         // Validate conversation ID
-        // ----------------------------------------
+        // ====================================================
 
         if (!conversationId) {
           socket.emit(
@@ -847,9 +943,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Check membership
-        // ----------------------------------------
+        // ====================================================
 
         const isMember =
           await isConversationMember(
@@ -869,9 +965,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Check block relationship
-        // ----------------------------------------
+        // ====================================================
 
         const blocked =
           await isDirectConversationBlocked(
@@ -883,9 +979,9 @@ export const registerSocketHandlers = (
           return;
         }
 
-        // ----------------------------------------
+        // ====================================================
         // Emit typing stop
-        // ----------------------------------------
+        // ====================================================
 
         socket
           .to(conversationId)
@@ -938,3 +1034,5 @@ export const registerSocketHandlers = (
     },
   );
 };
+
+ 
