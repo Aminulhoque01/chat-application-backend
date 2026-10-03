@@ -10,6 +10,7 @@ const user_route_1 = __importDefault(require("./module/user/user.route"));
 const conversation_route_1 = __importDefault(require("./module/conversation/conversation.route"));
 const message_route_1 = __importDefault(require("./module/message/message.route"));
 const notification_route_1 = __importDefault(require("./module/notification/notification.route"));
+const block_route_1 = __importDefault(require("./module/block/block.route"));
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)({
     origin: true,
@@ -25,7 +26,8 @@ app.get("/health", (_req, res) => {
 });
 app.use("/api/user", user_route_1.default);
 app.use("/api/auth", auth_route_1.default);
+app.use("/api/block", block_route_1.default);
 app.use("/api/conversation", conversation_route_1.default);
 app.use("/api/message", message_route_1.default);
-app.use("api/notifications", notification_route_1.default);
+app.use("/api/notifications", notification_route_1.default);
 exports.default = app;

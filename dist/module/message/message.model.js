@@ -42,6 +42,22 @@ const messageSchema = new mongoose_1.Schema({
         ref: "User",
         required: true,
     },
+    /**
+     * text:
+     * Normal user message
+     *
+     * system:
+     * Group activity message
+     *
+     * Example:
+     * "Aminul left this group"
+     */
+    type: {
+        type: String,
+        enum: ["text", "system"],
+        default: "text",
+        required: true,
+    },
     text: {
         type: String,
         default: "",
@@ -110,18 +126,39 @@ const messageSchema = new mongoose_1.Schema({
     timestamps: true,
 });
 /*
-  Important validation:
-  Message must contain either:
-  - text
-  OR
-  - attachment
+  Message validation
+
+  Normal message:
+  - text OR attachment required
+
+  System message:
+  - text required
+  - attachment not required
 */
 messageSchema.pre("validate", function (next) {
     if (this.isDeleted) {
         return next();
     }
-    const hasText = typeof this.text === "string" && this.text.trim().length > 0;
-    const hasAttachments = this.attachments && this.attachments.length > 0;
+    const hasText = typeof this.text === "string" &&
+        this.text.trim().length > 0;
+    const hasAttachments = this.attachments &&
+        this.attachments.length > 0;
+    /*
+     * System message must contain text.
+     *
+     * Example:
+     * "Aminul left this group"
+     */
+    if (this.type === "system") {
+        if (!hasText) {
+            return next(new Error("System message must contain text"));
+        }
+        return next();
+    }
+    /*
+     * Normal text message:
+     * text OR attachment
+     */
     if (!hasText && !hasAttachments) {
         return next(new Error("Message must contain text or attachment"));
     }

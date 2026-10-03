@@ -2,86 +2,167 @@ import mongoose from "mongoose";
 
 import { ConversationModel } from "./conversation.model";
 import { UserModel } from "../user/user.model";
-import { getCache, invalidateUserConversationsCache, setCache } from "../../cache/cache.service";
+
+import {
+  getCache,
+  invalidateUserConversationsCache,
+  setCache,
+} from "../../cache/cache.service";
+
 import { cacheKeys } from "../../cache/cache.keys";
+
 import { MessageModel } from "../message/message.model";
 
+import { uploadToCloudinary } from "../../utils/cloudinary";
 
+import { getSocketIO } from "../../socket/socket.instance";
+
+// ==========================================
+// SYSTEM MESSAGE REALTIME HELPER
+// ==========================================
+
+const createAndEmitSystemMessage = async ({
+  conversationId,
+  senderId,
+  text,
+  recipientUserIds,
+}: {
+  conversationId: string;
+  senderId: string;
+  text: string;
+  recipientUserIds: string[];
+}) => {
+  // ==========================================
+  // CREATE SYSTEM MESSAGE
+  // ==========================================
+
+  const systemMessage = await MessageModel.create({
+    conversationId: new mongoose.Types.ObjectId(conversationId),
+
+    senderId: new mongoose.Types.ObjectId(senderId),
+
+    type: "system",
+
+    text,
+
+    attachments: [],
+
+    isEdited: false,
+
+    isDeleted: false,
+
+    deletedAt: null,
+
+    deliveredTo: [],
+
+    readBy: [],
+
+    reactions: [],
+
+    replyTo: null,
+
+    isForwarded: false,
+
+    forwardedFrom: null,
+  });
+
+  // ==========================================
+  // POPULATE SENDER
+  // ==========================================
+
+  await systemMessage.populate(
+    "senderId",
+    "phone name avatar bio isOnline lastSeen",
+  );
+
+  // ==========================================
+  // GET SOCKET.IO
+  // ==========================================
+
+  const io = getSocketIO();
+
+  // ==========================================
+  // UNIQUE USER ROOMS
+  // ==========================================
+
+  const uniqueUserIds = [
+    ...new Set(recipientUserIds.map((id) => id.toString())),
+  ];
+
+  // ==========================================
+  // BUILD SOCKET ROOMS
+  // ==========================================
+
+  const rooms = uniqueUserIds.map((userId) => `user:${userId}`);
+
+  // ==========================================
+  // REALTIME MESSAGE
+  // ==========================================
+
+  if (rooms.length > 0) {
+    io.to(rooms).emit("message:new", systemMessage);
+  }
+
+  return systemMessage;
+};
+
+// ==========================================
+// CREATE DIRECT CONVERSATION
+// ==========================================
 
 export const createDirectConversation = async (
   currentUserId: string,
   participantId: string,
 ) => {
-  if (
-    !mongoose.Types.ObjectId.isValid(currentUserId)
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(participantId)
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(participantId)) {
     throw new Error("Invalid participant ID");
   }
 
   if (currentUserId === participantId) {
-    throw new Error(
-      "You cannot create a conversation with yourself",
-    );
+    throw new Error("You cannot create a conversation with yourself");
   }
 
-  const participant = await UserModel.findById(
-    participantId,
-  );
+  const participant = await UserModel.findById(participantId);
 
   if (!participant) {
     throw new Error("Participant user not found");
   }
 
-  const currentUserObjectId =
-    new mongoose.Types.ObjectId(currentUserId);
+  const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
 
-  const participantObjectId =
-    new mongoose.Types.ObjectId(participantId);
+  const participantObjectId = new mongoose.Types.ObjectId(participantId);
 
-  const existingConversation =
-    await ConversationModel.findOne({
-      type: "direct",
+  const existingConversation = await ConversationModel.findOne({
+    type: "direct",
 
-      participants: {
-        $all: [
-          currentUserObjectId,
-          participantObjectId,
-        ],
+    participants: {
+      $all: [currentUserObjectId, participantObjectId],
 
-        $size: 2,
-      },
-    })
-      .populate(
-        "participants",
-        "phone name avatar bio isOnline lastSeen",
-      )
-      .populate("lastMessage");
+      $size: 2,
+    },
+  })
+    .populate("participants", "phone name avatar bio isOnline lastSeen")
+    .populate("lastMessage");
 
   if (existingConversation) {
     return existingConversation;
   }
 
-  const conversation =
-    await ConversationModel.create({
-      type: "direct",
+  const conversation = await ConversationModel.create({
+    type: "direct",
 
-      participants: [
-        currentUserObjectId,
-        participantObjectId,
-      ],
+    participants: [currentUserObjectId, participantObjectId],
 
-      admins: [],
+    admins: [],
 
-      createdBy: currentUserObjectId,
+    createdBy: currentUserObjectId,
 
-      lastMessage: null,
-    });
+    lastMessage: null,
+  });
 
   await conversation.populate(
     "participants",
@@ -91,763 +172,877 @@ export const createDirectConversation = async (
   return conversation;
 };
 
-export const getMyConversations = async (
-  currentUserId: string,
-) => {
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      currentUserId,
-    )
-  ) {
-    throw new Error(
-      "Invalid user ID",
-    );
+// ==========================================
+// GET MY CONVERSATIONS
+// ==========================================
+
+export const getMyConversations = async (currentUserId: string) => {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
+    throw new Error("Invalid user ID");
   }
 
-  const cacheKey =
-    cacheKeys.userConversations(
-      currentUserId,
-    );
+  const cacheKey = cacheKeys.userConversations(currentUserId);
 
   // ==========================================
-  // Redis HIT
+  // REDIS HIT
   // ==========================================
 
-  const cachedConversations =
-    await getCache(cacheKey);
+  const cachedConversations = await getCache(cacheKey);
 
   if (cachedConversations) {
-    console.log(
-      "Conversations: Redis HIT",
-    );
+    console.log("Conversations: Redis HIT");
 
     return cachedConversations;
   }
 
-  console.log(
-    "Conversations: Redis MISS",
-  );
+  console.log("Conversations: Redis MISS");
 
-  const currentUserObjectId =
-    new mongoose.Types.ObjectId(
-      currentUserId,
-    );
+  const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
 
   // ==========================================
-  // MongoDB - Get conversations
+  // GET CONVERSATIONS
   // ==========================================
 
-  const conversations =
-    await ConversationModel.find({
-      participants:
-        currentUserObjectId,
+  const conversations = await ConversationModel.find({
+    participants: currentUserObjectId,
+  })
+    .populate("participants", "phone name avatar bio isOnline lastSeen")
+    .populate("createdBy", "phone name avatar")
+    .populate({
+      path: "lastMessage",
+
+      populate: {
+        path: "senderId",
+
+        select: "phone name avatar",
+      },
     })
-      .populate(
-        "participants",
-        "phone name avatar bio isOnline lastSeen",
-      )
-      .populate(
-        "createdBy",
-        "phone name avatar",
-      )
-      .populate(
-        "lastMessage",
-      )
-      .sort({
-        updatedAt: -1,
-      })
-      .lean();
+    .sort({
+      updatedAt: -1,
+    })
+    .lean();
 
   // ==========================================
-  // Add unread count
+  // UNREAD COUNT
   // ==========================================
 
-  const conversationsWithUnreadCount =
-    await Promise.all(
-      conversations.map(
-        async (conversation) => {
-          const unreadCount =
-            await MessageModel.countDocuments({
-              conversationId:
-                conversation._id,
+  const conversationsWithUnreadCount = await Promise.all(
+    conversations.map(async (conversation) => {
+      const unreadCount = await MessageModel.countDocuments({
+        conversationId: conversation._id,
 
-              // Own messages are not unread
-              senderId: {
-                $ne:
-                  currentUserObjectId,
-              },
-
-              // Deleted messages are not unread
-              isDeleted: false,
-
-              // Current user has not read
-              readBy: {
-                $nin: [
-                  currentUserObjectId,
-                ],
-              },
-            });
-
-          return {
-            ...conversation,
-
-            unreadCount,
-          };
+        // Own messages are not unread
+        senderId: {
+          $ne: currentUserObjectId,
         },
-      ),
-    );
 
-  // ==========================================
-  // Save to Redis
-  // ==========================================
+        // System messages are not unread
+        type: {
+          $ne: "system",
+        },
 
-  await setCache(
-    cacheKey,
-    conversationsWithUnreadCount,
-    300,
+        // Deleted messages are not unread
+        isDeleted: false,
+
+        // Current user has not read
+        readBy: {
+          $nin: [currentUserObjectId],
+        },
+      });
+
+      return {
+        ...conversation,
+
+        unreadCount,
+      };
+    }),
   );
+
+  // ==========================================
+  // REDIS
+  // ==========================================
+
+  await setCache(cacheKey, conversationsWithUnreadCount, 300);
 
   return conversationsWithUnreadCount;
 };
 
+// ==========================================
+// CREATE GROUP
+// ==========================================
 
 export const createGroupConversation = async (
   currentUserId: string,
   name: string,
   participantIds: string[],
 ) => {
-  // 1. Validate current user ID
-  if (
-    !mongoose.Types.ObjectId.isValid(currentUserId)
-  ) {
+  // ==========================================
+  // VALIDATE CURRENT USER
+  // ==========================================
+
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  // 2. Minimum 2 other participants
+  // ==========================================
+  // MINIMUM MEMBERS
+  // ==========================================
+
   if (participantIds.length < 2) {
-    throw new Error(
-      "A group must have at least 3 members",
-    );
+    throw new Error("A group must have at least 3 members");
   }
 
-  // 3. Remove duplicate IDs
-  const uniqueParticipantIds = [
-    ...new Set(participantIds),
-  ];
+  // ==========================================
+  // REMOVE DUPLICATES
+  // ==========================================
 
-  if (
-    uniqueParticipantIds.length !==
-    participantIds.length
-  ) {
-    throw new Error(
-      "Duplicate participants are not allowed",
-    );
+  const uniqueParticipantIds = [...new Set(participantIds)];
+
+  if (uniqueParticipantIds.length !== participantIds.length) {
+    throw new Error("Duplicate participants are not allowed");
   }
 
-  // 4. Validate every participant ID
-  const invalidParticipantId =
-    uniqueParticipantIds.find(
-      (id) =>
-        !mongoose.Types.ObjectId.isValid(id),
-    );
+  // ==========================================
+  // VALIDATE PARTICIPANT IDS
+  // ==========================================
+
+  const invalidParticipantId = uniqueParticipantIds.find(
+    (id) => !mongoose.Types.ObjectId.isValid(id),
+  );
 
   if (invalidParticipantId) {
-    throw new Error(
-      `Invalid participant ID: ${invalidParticipantId}`,
-    );
+    throw new Error(`Invalid participant ID: ${invalidParticipantId}`);
   }
 
-  // 5. Current user cannot be passed as another participant
-  if (
-    uniqueParticipantIds.includes(
-      currentUserId,
-    )
-  ) {
-    throw new Error(
-      "You are already included automatically",
-    );
+  // ==========================================
+  // CURRENT USER CANNOT BE PASSED
+  // ==========================================
+
+  if (uniqueParticipantIds.includes(currentUserId)) {
+    throw new Error("You are already included automatically");
   }
 
-  // 6. Check all users exist
+  // ==========================================
+  // CHECK USERS
+  // ==========================================
+
   const users = await UserModel.find({
     _id: {
       $in: uniqueParticipantIds,
     },
   }).select("_id");
 
-  if (
-    users.length !==
-    uniqueParticipantIds.length
-  ) {
-    throw new Error(
-      "One or more participants do not exist",
-    );
+  if (users.length !== uniqueParticipantIds.length) {
+    throw new Error("One or more participants do not exist");
   }
 
-  // 7. Prepare ObjectIds
-  const currentUserObjectId =
-    new mongoose.Types.ObjectId(
-      currentUserId,
-    );
+  // ==========================================
+  // OBJECT IDS
+  // ==========================================
 
-  const participantObjectIds =
-    uniqueParticipantIds.map(
-      (id) =>
-        new mongoose.Types.ObjectId(id),
-    );
+  const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
 
-  // 8. Create group
-  const conversation =
-    await ConversationModel.create({
-      type: "group",
+  const participantObjectIds = uniqueParticipantIds.map(
+    (id) => new mongoose.Types.ObjectId(id),
+  );
 
-      name: name.trim(),
+  // ==========================================
+  // CREATE GROUP
+  // ==========================================
 
-      participants: [
-        currentUserObjectId,
-        ...participantObjectIds,
-      ],
+  const conversation = await ConversationModel.create({
+    type: "group",
 
-      admins: [
-        currentUserObjectId,
-      ],
+    name: name.trim(),
 
-      createdBy: currentUserObjectId,
+    participants: [currentUserObjectId, ...participantObjectIds],
 
-      lastMessage: null,
-    });
+    admins: [currentUserObjectId],
 
-  // 9. Populate participants
+    createdBy: currentUserObjectId,
+
+    lastMessage: null,
+  });
+
+  // ==========================================
+  // POPULATE
+  // ==========================================
+
   await conversation.populate(
     "participants",
     "phone name avatar bio isOnline lastSeen",
   );
 
-  // 10. Populate creator
-  await conversation.populate(
-    "createdBy",
-    "phone name avatar",
-  );
+  await conversation.populate("createdBy", "phone name avatar");
 
-  // 11. Return conversation
   return conversation;
 };
 
-
+// ==========================================
+// ADD PARTICIPANTS
+// ==========================================
 
 export const addParticipantsToGroup = async (
   currentUserId: string,
   conversationId: string,
   participantIds: string[],
 ) => {
-  // 1. Validate conversation ID
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      conversationId,
-    )
-  ) {
-    throw new Error(
-      "Invalid conversation ID",
-    );
+  // ==========================================
+  // VALIDATION
+  // ==========================================
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    throw new Error("Invalid conversation ID");
   }
 
-  // 2. Validate current user ID
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      currentUserId,
-    )
-  ) {
-    throw new Error(
-      "Invalid current user ID",
-    );
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
+    throw new Error("Invalid current user ID");
   }
 
-  // 3. Validate participant IDs
-  const invalidParticipantId =
-    participantIds.find(
-      (id) =>
-        !mongoose.Types.ObjectId.isValid(id),
-    );
+  const invalidParticipantId = participantIds.find(
+    (id) => !mongoose.Types.ObjectId.isValid(id),
+  );
 
   if (invalidParticipantId) {
-    throw new Error(
-      `Invalid participant ID: ${invalidParticipantId}`,
-    );
+    throw new Error(`Invalid participant ID: ${invalidParticipantId}`);
   }
 
-  // 4. Remove duplicate IDs
-  const uniqueParticipantIds = [
-    ...new Set(participantIds),
-  ];
+  // ==========================================
+  // UNIQUE IDS
+  // ==========================================
 
-  // 5. Find conversation
-  const conversation =
-    await ConversationModel.findById(
-      conversationId,
-    );
+  const uniqueParticipantIds = [...new Set(participantIds)];
+
+  // ==========================================
+  // FIND CONVERSATION
+  // ==========================================
+
+  const conversation = await ConversationModel.findById(conversationId);
 
   if (!conversation) {
-    throw new Error(
-      "Conversation not found",
-    );
+    throw new Error("Conversation not found");
   }
 
-  // 6. Must be a group
+  // ==========================================
+  // MUST BE GROUP
+  // ==========================================
+
   if (conversation.type !== "group") {
-    throw new Error(
-      "Participants can only be added to groups",
-    );
+    throw new Error("Participants can only be added to groups");
   }
 
-  // 7. Check current user is admin
-  const isAdmin =
-    conversation.admins.some(
-      (adminId) =>
-        adminId.toString() ===
-        currentUserId,
-    );
+  // ==========================================
+  // CHECK ADMIN
+  // ==========================================
+
+  const isAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
 
   if (!isAdmin) {
-    throw new Error(
-      "Only group admins can add participants",
-    );
+    throw new Error("Only group admins can add participants");
   }
 
-  // 8. Convert IDs to ObjectIds
-  const newParticipantObjectIds =
-    uniqueParticipantIds.map(
-      (id) =>
-        new mongoose.Types.ObjectId(id),
-    );
+  // ==========================================
+  // OBJECT IDS
+  // ==========================================
 
-  // 9. Check whether users exist
+  const newParticipantObjectIds = uniqueParticipantIds.map(
+    (id) => new mongoose.Types.ObjectId(id),
+  );
+
+  // ==========================================
+  // CHECK USERS
+  // ==========================================
+
   const users = await UserModel.find({
     _id: {
       $in: newParticipantObjectIds,
     },
-  }).select("_id");
+  }).select("_id name phone");
 
-  if (
-    users.length !==
-    newParticipantObjectIds.length
-  ) {
-    throw new Error(
-      "One or more users do not exist",
-    );
+  if (users.length !== newParticipantObjectIds.length) {
+    throw new Error("One or more users do not exist");
   }
 
-  // 10. Prevent adding existing members
-  const existingParticipantIds =
-    new Set(
-      conversation.participants.map(
-        (id) => id.toString(),
-      ),
-    );
+  // ==========================================
+  // CHECK EXISTING MEMBERS
+  // ==========================================
 
-  const alreadyMembers =
-    uniqueParticipantIds.filter((id) =>
-      existingParticipantIds.has(id),
-    );
+  const existingParticipantIds = new Set(
+    conversation.participants.map((id) => id.toString()),
+  );
+
+  const alreadyMembers = uniqueParticipantIds.filter((id) =>
+    existingParticipantIds.has(id),
+  );
 
   if (alreadyMembers.length > 0) {
-    throw new Error(
-      "One or more users are already group members",
-    );
+    throw new Error("One or more users are already group members");
   }
 
-  // 11. Add new participants
-  conversation.participants.push(
-    ...newParticipantObjectIds,
-  );
+  // ==========================================
+  // ADD PARTICIPANTS
+  // ==========================================
+
+  conversation.participants.push(...newParticipantObjectIds);
 
   await conversation.save();
 
-  await invalidateUserConversationsCache([
-    currentUserId,
-    ...uniqueParticipantIds,
-  ]);
+  // ==========================================
+  // USER NAMES
+  // ==========================================
 
-  // 12. Populate response
+  const addedUserNames = users.map(
+    (user) => user.name?.trim() || user.phone || "User",
+  );
+
+  // ==========================================
+  // SYSTEM MESSAGE TEXT
+  // ==========================================
+
+  let systemMessageText: string;
+
+  if (addedUserNames.length === 1) {
+    systemMessageText = `${addedUserNames[0]} was added to this group`;
+  } else if (addedUserNames.length === 2) {
+    systemMessageText = `${addedUserNames[0]} and ${addedUserNames[1]} were added to this group`;
+  } else {
+    const lastUser = addedUserNames[addedUserNames.length - 1];
+
+    const firstUsers = addedUserNames.slice(0, -1).join(", ");
+
+    systemMessageText = `${firstUsers} and ${lastUser} were added to this group`;
+  }
+
+  // ==========================================
+  // ALL MEMBERS
+  // ==========================================
+
+  const allMemberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
+  );
+
+  // ==========================================
+  // CREATE + REALTIME SYSTEM MESSAGE
+  // ==========================================
+
+  const systemMessage = await createAndEmitSystemMessage({
+    conversationId: conversation._id.toString(),
+
+    senderId: currentUserId,
+
+    text: systemMessageText,
+
+    recipientUserIds: allMemberIds,
+  });
+
+  // ==========================================
+  // LAST MESSAGE
+  // ==========================================
+
+  conversation.lastMessage = systemMessage._id;
+
+  await conversation.save();
+
+  // ==========================================
+  // CACHE INVALIDATION
+  // ==========================================
+
+  await invalidateUserConversationsCache(allMemberIds);
+
+  // ==========================================
+  // POPULATE
+  // ==========================================
+
   await conversation.populate(
     "participants",
     "phone name avatar bio isOnline lastSeen",
   );
 
-  await conversation.populate(
-    "createdBy",
-    "phone name avatar",
-  );
+  await conversation.populate("createdBy", "phone name avatar");
+
+  await conversation.populate({
+    path: "lastMessage",
+
+    populate: {
+      path: "senderId",
+
+      select: "phone name avatar",
+    },
+  });
 
   return conversation;
 };
 
+// ==========================================
+// REMOVE / LEAVE GROUP
+// ==========================================
 
 export const removeParticipantFromGroup = async (
   currentUserId: string,
   conversationId: string,
   targetUserId: string,
 ) => {
-  // Validate IDs
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      conversationId,
-    )
-  ) {
+  // ==========================================
+  // VALIDATE CONVERSATION
+  // ==========================================
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
     throw new Error("Invalid conversation ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      currentUserId,
-    )
-  ) {
+  // ==========================================
+  // VALIDATE CURRENT USER
+  // ==========================================
+
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      targetUserId,
-    )
-  ) {
+  // ==========================================
+  // VALIDATE TARGET USER
+  // ==========================================
+
+  if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
     throw new Error("Invalid target user ID");
   }
 
-  // Find conversation
-  const conversation =
-    await ConversationModel.findById(
-      conversationId,
-    );
+  // ==========================================
+  // FIND CONVERSATION
+  // ==========================================
+
+  const conversation = await ConversationModel.findById(conversationId);
 
   if (!conversation) {
     throw new Error("Conversation not found");
   }
 
-  // Must be group
+  // ==========================================
+  // MUST BE GROUP
+  // ==========================================
+
   if (conversation.type !== "group") {
-    throw new Error(
-      "Participants can only be removed from groups",
-    );
+    throw new Error("Participants can only be removed from groups");
   }
 
-  // Check current user is a member
-  const isMember =
-    conversation.participants.some(
-      (participantId) =>
-        participantId.toString() ===
-        currentUserId,
-    );
+  // ==========================================
+  // CHECK CURRENT USER MEMBER
+  // ==========================================
+
+  const isMember = conversation.participants.some(
+    (participantId) => participantId.toString() === currentUserId,
+  );
 
   if (!isMember) {
-    throw new Error(
-      "You are not a member of this group",
-    );
+    throw new Error("You are not a member of this group");
   }
 
-  // Check target user is a member
-  const isTargetMember =
-    conversation.participants.some(
-      (participantId) =>
-        participantId.toString() ===
-        targetUserId,
-    );
+  // ==========================================
+  // CHECK TARGET MEMBER
+  // ==========================================
+
+  const isTargetMember = conversation.participants.some(
+    (participantId) => participantId.toString() === targetUserId,
+  );
 
   if (!isTargetMember) {
-    throw new Error(
-      "Target user is not a member of this group",
-    );
+    throw new Error("Target user is not a member of this group");
   }
 
-  // Is current user admin?
-  const isAdmin =
-    conversation.admins.some(
-      (adminId) =>
-        adminId.toString() ===
-        currentUserId,
-    );
+  // ==========================================
+  // CHECK ADMIN
+  // ==========================================
 
-  // ------------------------------------------------
-  // CASE 1: User wants to leave the group
-  // ------------------------------------------------
+  const isAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
 
-  const isLeaving =
-    currentUserId === targetUserId;
+  // ==========================================
+  // LEAVE OR ADMIN REMOVE
+  // ==========================================
+
+  const isLeaving = currentUserId === targetUserId;
 
   if (!isLeaving && !isAdmin) {
-    throw new Error(
-      "Only group admins can remove other members",
-    );
+    throw new Error("Only group admins can remove other members");
   }
 
-  // ------------------------------------------------
-  // Prevent removing last member
-  // ------------------------------------------------
+  // ==========================================
+  // PREVENT LAST MEMBER
+  // ==========================================
 
   if (conversation.participants.length <= 1) {
-    throw new Error(
-      "Group must have at least one member",
-    );
+    throw new Error("Group must have at least one member");
   }
 
-  // ------------------------------------------------
-  // Remove participant
-  // ------------------------------------------------
+  // ==========================================
+  // GET USERS
+  // ==========================================
 
-  conversation.participants =
-    conversation.participants.filter(
-      (participantId) =>
-        participantId.toString() !==
-        targetUserId,
-    );
+  const targetUser =
+    await UserModel.findById(targetUserId).select("name phone");
 
-  // ------------------------------------------------
-  // Remove from admins as well
-  // ------------------------------------------------
+  if (!targetUser) {
+    throw new Error("Target user not found");
+  }
 
-  conversation.admins =
-    conversation.admins.filter(
-      (adminId) =>
-        adminId.toString() !==
-        targetUserId,
-    );
+  const currentUser =
+    await UserModel.findById(currentUserId).select("name phone");
+
+  if (!currentUser) {
+    throw new Error("Current user not found");
+  }
+
+  const targetUserName = targetUser.name?.trim() || targetUser.phone || "User";
+
+  const currentUserName =
+    currentUser.name?.trim() || currentUser.phone || "User";
+
+  // ==========================================
+  // SYSTEM MESSAGE TEXT
+  // ==========================================
+
+  let systemMessageText: string;
+
+  if (isLeaving) {
+    systemMessageText = `${targetUserName} left this group`;
+  } else {
+    systemMessageText = `${currentUserName} removed ${targetUserName} from this group`;
+  }
+
+  // ==========================================
+  // REMOVE PARTICIPANT
+  // ==========================================
+
+  conversation.participants = conversation.participants.filter(
+    (participantId) => participantId.toString() !== targetUserId,
+  );
+
+  // ==========================================
+  // REMOVE ADMIN
+  // ==========================================
+
+  conversation.admins = conversation.admins.filter(
+    (adminId) => adminId.toString() !== targetUserId,
+  );
+
+  // ==========================================
+  // SAVE PARTICIPANT CHANGE
+  // ==========================================
 
   await conversation.save();
 
+  // ==========================================
+  // REMAINING MEMBERS
+  // ==========================================
+
+  const remainingMemberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
+  );
+
+  // ==========================================
+  // RECIPIENTS
+  //
+  // Remaining members always receive it.
+  //
+  // If admin removes someone, target also
+  // receives the final system event so their
+  // currently-open UI can update immediately.
+  //
+  // If user leaves themselves, target ===
+  // current user, so we also send it to them.
+  // ==========================================
+
+  const recipientUserIds = [...remainingMemberIds, targetUserId];
+
+  // ==========================================
+  // CREATE + REALTIME SYSTEM MESSAGE
+  // ==========================================
+
+  const systemMessage = await createAndEmitSystemMessage({
+    conversationId: conversation._id.toString(),
+
+    // System event is performed by current user
+    senderId: currentUserId,
+
+    text: systemMessageText,
+
+    recipientUserIds,
+  });
+
+  // ==========================================
+  // LAST MESSAGE
+  // ==========================================
+
+  conversation.lastMessage = systemMessage._id;
+
+  await conversation.save();
+
+  // ==========================================
+  // CACHE INVALIDATION
+  // ==========================================
+
   await invalidateUserConversationsCache([
-    currentUserId,
+    ...remainingMemberIds,
     targetUserId,
+    currentUserId,
   ]);
 
-  // Populate response
+  // ==========================================
+  // POPULATE PARTICIPANTS
+  // ==========================================
+
   await conversation.populate(
     "participants",
     "phone name avatar bio isOnline lastSeen",
   );
 
-  await conversation.populate(
-    "createdBy",
-    "phone name avatar",
-  );
+  // ==========================================
+  // POPULATE CREATOR
+  // ==========================================
+
+  await conversation.populate("createdBy", "phone name avatar");
+
+  // ==========================================
+  // POPULATE LAST MESSAGE
+  // ==========================================
+
+  await conversation.populate({
+    path: "lastMessage",
+
+    populate: {
+      path: "senderId",
+
+      select: "phone name avatar",
+    },
+  });
 
   return conversation;
 };
 
+// ==========================================
+// PROMOTE MEMBER TO ADMIN
+// ==========================================
 
 export const promoteMemberToAdmin = async (
   currentUserId: string,
   conversationId: string,
   targetUserId: string,
 ) => {
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      conversationId,
-    )
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
     throw new Error("Invalid conversation ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      currentUserId,
-    )
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      targetUserId,
-    )
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
     throw new Error("Invalid target user ID");
   }
 
-  const conversation =
-    await ConversationModel.findById(
-      conversationId,
-    );
+  const conversation = await ConversationModel.findById(conversationId);
 
   if (!conversation) {
     throw new Error("Conversation not found");
   }
 
   if (conversation.type !== "group") {
-    throw new Error(
-      "Only groups can have admins",
-    );
+    throw new Error("Only groups can have admins");
   }
 
-  // Current user must be member
-  const isCurrentUserMember =
-    conversation.participants.some(
-      (participantId) =>
-        participantId.toString() ===
-        currentUserId,
-    );
-
-  if (!isCurrentUserMember) {
-    throw new Error(
-      "You are not a member of this group",
-    );
-  }
-
-  // Current user must be admin
-  const isCurrentUserAdmin =
-    conversation.admins.some(
-      (adminId) =>
-        adminId.toString() ===
-        currentUserId,
-    );
-
-  if (!isCurrentUserAdmin) {
-    throw new Error(
-      "Only group admins can promote members",
-    );
-  }
-
-  // Target must be member
-  const isTargetMember =
-    conversation.participants.some(
-      (participantId) =>
-        participantId.toString() ===
-        targetUserId,
-    );
-
-  if (!isTargetMember) {
-    throw new Error(
-      "Target user is not a group member",
-    );
-  }
-
-  // Already admin?
-  const isAlreadyAdmin =
-    conversation.admins.some(
-      (adminId) =>
-        adminId.toString() ===
-        targetUserId,
-    );
-
-  if (isAlreadyAdmin) {
-    throw new Error(
-      "User is already an admin",
-    );
-  }
-
-  // Promote
-  conversation.admins.push(
-    new mongoose.Types.ObjectId(
-      targetUserId,
-    ),
+  const isCurrentUserMember = conversation.participants.some(
+    (participantId) => participantId.toString() === currentUserId,
   );
 
+  if (!isCurrentUserMember) {
+    throw new Error("You are not a member of this group");
+  }
+
+  const isCurrentUserAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
+
+  if (!isCurrentUserAdmin) {
+    throw new Error("Only group admins can promote members");
+  }
+
+  const isTargetMember = conversation.participants.some(
+    (participantId) => participantId.toString() === targetUserId,
+  );
+
+  if (!isTargetMember) {
+    throw new Error("Target user is not a group member");
+  }
+
+  const isAlreadyAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === targetUserId,
+  );
+
+  if (isAlreadyAdmin) {
+    throw new Error("User is already an admin");
+  }
+
+  // ==========================================
+  // TARGET USER
+  // ==========================================
+
+  const targetUser =
+    await UserModel.findById(targetUserId).select("name phone");
+
+  if (!targetUser) {
+    throw new Error("Target user not found");
+  }
+
+  // ==========================================
+  // CURRENT USER
+  // ==========================================
+
+  const currentUser =
+    await UserModel.findById(currentUserId).select("name phone");
+
+  if (!currentUser) {
+    throw new Error("Current user not found");
+  }
+
+  const targetUserName = targetUser.name?.trim() || targetUser.phone || "User";
+
+  const currentUserName =
+    currentUser.name?.trim() || currentUser.phone || "User";
+
+  // ==========================================
+  // PROMOTE
+  // ==========================================
+
+  conversation.admins.push(new mongoose.Types.ObjectId(targetUserId));
+
   await conversation.save();
-  await invalidateUserConversationsCache([
-    currentUserId,
-    targetUserId,
-  ]);
+
+  // ==========================================
+  // SYSTEM MESSAGE
+  // ==========================================
+
+  const systemMessageText = `${targetUserName} is now an admin`;
+
+  const memberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
+  );
+
+  const systemMessage = await createAndEmitSystemMessage({
+    conversationId: conversation._id.toString(),
+
+    senderId: currentUserId,
+
+    text: systemMessageText,
+
+    recipientUserIds: memberIds,
+  });
+
+  // ==========================================
+  // LAST MESSAGE
+  // ==========================================
+
+  conversation.lastMessage = systemMessage._id;
+
+  await conversation.save();
+
+  // ==========================================
+  // CACHE
+  // ==========================================
+
+  await invalidateUserConversationsCache(memberIds);
+
+  // ==========================================
+  // POPULATE
+  // ==========================================
 
   await conversation.populate(
     "participants",
     "phone name avatar bio isOnline lastSeen",
   );
 
-  await conversation.populate(
-    "createdBy",
-    "phone name avatar",
-  );
+  await conversation.populate("createdBy", "phone name avatar");
+
+  await conversation.populate({
+    path: "lastMessage",
+
+    populate: {
+      path: "senderId",
+
+      select: "phone name avatar",
+    },
+  });
 
   return conversation;
 };
 
+// ==========================================
+// RENAME GROUP
+// ==========================================
 
 export const renameGroupConversation = async (
   currentUserId: string,
   conversationId: string,
   name: string,
 ) => {
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      conversationId,
-    )
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
     throw new Error("Invalid conversation ID");
   }
 
-  if (
-    !mongoose.Types.ObjectId.isValid(
-      currentUserId,
-    )
-  ) {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
     throw new Error("Invalid current user ID");
   }
 
-  const conversation =
-    await ConversationModel.findById(
-      conversationId,
-    );
+  const conversation = await ConversationModel.findById(conversationId);
 
   if (!conversation) {
     throw new Error("Conversation not found");
   }
 
   if (conversation.type !== "group") {
-    throw new Error(
-      "Only groups can be renamed",
-    );
+    throw new Error("Only groups can be renamed");
   }
 
-  const isMember =
-    conversation.participants.some(
-      (participantId) =>
-        participantId.toString() ===
-        currentUserId,
-    );
+  const isMember = conversation.participants.some(
+    (participantId) => participantId.toString() === currentUserId,
+  );
 
   if (!isMember) {
-    throw new Error(
-      "You are not a member of this group",
-    );
+    throw new Error("You are not a member of this group");
   }
 
-  const isAdmin =
-    conversation.admins.some(
-      (adminId) =>
-        adminId.toString() ===
-        currentUserId,
-    );
+  const isAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
 
   if (!isAdmin) {
-    throw new Error(
-      "Only group admins can rename the group",
-    );
+    throw new Error("Only group admins can rename the group");
   }
 
   conversation.name = name.trim();
 
   await conversation.save();
 
-  const memberIds =
-  conversation.participants.map(
-    (participantId) =>
-      participantId.toString(),
+  const memberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
   );
 
-  await invalidateUserConversationsCache(
-    memberIds,
-  );
+  await invalidateUserConversationsCache(memberIds);
 
   await conversation.populate(
     "participants",
     "phone name avatar bio isOnline lastSeen",
   );
 
-  await conversation.populate(
-    "createdBy",
-    "phone name avatar",
-  );
+  await conversation.populate("createdBy", "phone name avatar");
 
   return conversation;
 };
 
+// ==========================================
+// CHECK CONVERSATION MEMBER
+// ==========================================
 
 export const isConversationMember = async (
   conversationId: string,
@@ -860,11 +1055,150 @@ export const isConversationMember = async (
     return false;
   }
 
-  const conversation =
-    await ConversationModel.findOne({
-      _id: conversationId,
-      participants: userId,
-    }).select("_id");
+  const conversation = await ConversationModel.findOne({
+    _id: conversationId,
+
+    participants: userId,
+  }).select("_id");
 
   return !!conversation;
+};
+
+// ==========================================
+// UPDATE GROUP PHOTO
+// ==========================================
+
+export const updateGroupPhoto = async (
+  currentUserId: string,
+  conversationId: string,
+  file: Express.Multer.File,
+) => {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
+    throw new Error("Invalid current user ID");
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    throw new Error("Invalid conversation ID");
+  }
+
+  if (!file) {
+    throw new Error("Group photo is required");
+  }
+
+  const conversation = await ConversationModel.findById(conversationId);
+
+  if (!conversation) {
+    throw new Error("Conversation not found");
+  }
+
+  if (conversation.type !== "group") {
+    throw new Error("Only groups can have a group photo");
+  }
+
+  const isMember = conversation.participants.some(
+    (participantId) => participantId.toString() === currentUserId,
+  );
+
+  if (!isMember) {
+    throw new Error("You are not a member of this group");
+  }
+
+  const isAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
+
+  if (!isAdmin) {
+    throw new Error("Only group admins can change the group photo");
+  }
+
+  const uploadResult = await uploadToCloudinary(file.buffer, "chat-app/groups");
+
+  conversation.groupPhoto = uploadResult.secure_url;
+
+  await conversation.save();
+
+  const memberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
+  );
+
+  await invalidateUserConversationsCache(memberIds);
+
+  await conversation.populate(
+    "participants",
+    "phone name avatar bio isOnline lastSeen",
+  );
+
+  await conversation.populate("createdBy", "phone name avatar");
+
+  return conversation;
+};
+
+// ==========================================
+// DELETE GROUP
+// ==========================================
+
+export const deleteGroupConversation = async (
+  currentUserId: string,
+  conversationId: string,
+) => {
+  if (!mongoose.Types.ObjectId.isValid(currentUserId)) {
+    throw new Error("Invalid current user ID");
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    throw new Error("Invalid conversation ID");
+  }
+
+  const conversation = await ConversationModel.findById(conversationId);
+
+  if (!conversation) {
+    throw new Error("Conversation not found");
+  }
+
+  if (conversation.type !== "group") {
+    throw new Error("Only groups can be deleted");
+  }
+
+  const isAdmin = conversation.admins.some(
+    (adminId) => adminId.toString() === currentUserId,
+  );
+
+  if (!isAdmin) {
+    throw new Error("Only group admins can delete the group");
+  }
+
+  const memberIds = conversation.participants.map((participantId) =>
+    participantId.toString(),
+  );
+
+  // ==========================================
+  // DELETE MESSAGES
+  // ==========================================
+
+  await MessageModel.deleteMany({
+    conversationId: conversation._id,
+  });
+
+  // ==========================================
+  // DELETE CONVERSATION
+  // ==========================================
+
+  await ConversationModel.deleteOne({
+    _id: conversation._id,
+  });
+
+  // ==========================================
+  // INVALIDATE CACHE
+  // ==========================================
+
+  await invalidateUserConversationsCache(memberIds);
+
+  // ==========================================
+  // RETURN
+  // ==========================================
+
+  return {
+    conversationId,
+    deleted: true,
+  };
 };

@@ -73,7 +73,6 @@ const sendMessage = async (req, res) => {
             const participantRoom = `user:${participantId.toString()}`;
             io.to(participantRoom).emit("message:new", message);
         }
-        console.log(`REST message ${message._id} sent to personal rooms`);
         // ==========================================
         // Response
         // ==========================================
@@ -84,7 +83,6 @@ const sendMessage = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Send message error:", error);
         const message = error instanceof Error
             ? error.message
             : "Failed to send message";
@@ -126,7 +124,6 @@ const getMessages = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Get messages error:", error);
         const message = error instanceof Error ? error.message : "Failed to fetch messages";
         return res.status(400).json({
             success: false,
@@ -159,7 +156,6 @@ const markMessageAsReadController = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Mark message as read error:", error);
         const message = error instanceof Error
             ? error.message
             : "Failed to mark message as read";
@@ -200,7 +196,6 @@ const updateMessage = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Update message error:", error);
         return res.status(400).json({
             success: false,
             message: error instanceof Error ? error.message : "Failed to update message",
@@ -232,7 +227,6 @@ const deleteMessageController = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Delete message error:", error);
         const message = error instanceof Error ? error.message : "Failed to delete message";
         return res.status(400).json({
             success: false,
@@ -259,7 +253,6 @@ const addReactionController = async (req, res) => {
         });
     }
     catch (error) {
-        console.error("Add reaction error:", error);
         return res.status(400).json({
             success: false,
             message: error instanceof Error ? error.message : "Failed to add reaction",

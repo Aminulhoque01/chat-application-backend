@@ -1,4 +1,3 @@
- 
 import { Server } from "socket.io";
 import { Types } from "mongoose";
 
@@ -18,22 +17,30 @@ import {
   markMessageAsRead,
 } from "../module/message/message.service";
 
-import { isConversationMember } from "../module/conversation/conversation.service";
-import { ConversationModel } from "../module/conversation/conversation.model";
+import {
+  isConversationMember,
+} from "../module/conversation/conversation.service";
 
-import { BlockModel } from "../module/block/block.model";
+import {
+  ConversationModel,
+} from "../module/conversation/conversation.model";
+
+import {
+  MessageModel,
+} from "../module/message/message.model";
+
+import {
+  BlockModel,
+} from "../module/block/block.model";
+import { invalidateUserConversationsCache } from "../cache/cache.service";
+
+// IMPORTANT:
+// Change this path only if your cache utility is in another folder.
+ 
 
 /**
  * ============================================================
  * Populated sender type
- * ============================================================
- *
- * MessageModel senderId is normally an ObjectId.
- *
- * But createMessage() populates senderId before returning
- * the message.
- *
- * This type tells TypeScript about the populated structure.
  * ============================================================
  */
 interface PopulatedSender {
@@ -50,13 +57,6 @@ interface PopulatedSender {
  * ============================================================
  * Check whether current user is blocked with another user
  * inside a direct conversation.
- *
- * Block relationship:
- *
- * A -> B
- * B -> A
- *
- * Communication is blocked both ways.
  *
  * Group conversations are NOT affected by block.
  * ============================================================
@@ -224,6 +224,22 @@ export const registerSocketHandlers = (
           return;
         }
 
+        if (
+          !Types.ObjectId.isValid(
+            conversationId,
+          )
+        ) {
+          socket.emit(
+            "message:error",
+            {
+              message:
+                "Invalid conversation ID",
+            },
+          );
+
+          return;
+        }
+
         // ====================================================
         // Check membership
         // ====================================================
@@ -247,16 +263,31 @@ export const registerSocketHandlers = (
         }
 
         // ====================================================
+        // Check block relationship
+        //
+        // Group conversations are unaffected.
+        // ====================================================
+
+        const blocked =
+          await isDirectConversationBlocked(
+            conversationId,
+            userId,
+          );
+
+        if (blocked) {
+          socket.emit(
+            "message:error",
+            {
+              message:
+                "You cannot send messages in this conversation",
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
         // Create message
-        //
-        // createMessage() already handles:
-        //
-        // - conversation validation
-        // - block validation
-        // - reply validation
-        // - sender population
-        // - reply population
-        // - push notification
         // ====================================================
 
         const message =
@@ -287,12 +318,6 @@ export const registerSocketHandlers = (
 
         // ====================================================
         // Get populated sender
-        //
-        // createMessage() already populated senderId.
-        //
-        // TypeScript still knows senderId as ObjectId,
-        // therefore we explicitly describe the populated
-        // structure here.
         // ====================================================
 
         const sender =
@@ -308,12 +333,6 @@ export const registerSocketHandlers = (
 
         // ====================================================
         // Prepare sender payload
-        //
-        // This is important for frontend notification:
-        //
-        // senderId.name
-        // senderId.avatar
-        // senderId._id
         // ====================================================
 
         const populatedSender = {
@@ -340,14 +359,29 @@ export const registerSocketHandlers = (
         };
 
         // ====================================================
+        // Invalidate conversation caches
+        //
+        // New message changes:
+        // - lastMessage
+        // - updatedAt
+        // - unreadCount
+        //
+        // So every participant's conversation cache
+        // must be invalidated.
+        // ====================================================
+
+        const participantIds =
+          conversation.participants.map(
+            (participantId) =>
+              participantId.toString(),
+          );
+
+        await invalidateUserConversationsCache(
+          participantIds,
+        );
+
+        // ====================================================
         // Emit message to every participant
-        //
-        // Each participant has their own personal room:
-        //
-        // user:USER_ID
-        //
-        // This allows frontend to decide whether the
-        // notification should be shown.
         // ====================================================
 
         for (
@@ -426,12 +460,6 @@ export const registerSocketHandlers = (
 
         // ====================================================
         // Add / remove reaction
-        //
-        // addReaction() handles:
-        //
-        // - membership
-        // - deleted message
-        // - block relationship
         // ====================================================
 
         const result =
@@ -520,8 +548,6 @@ export const registerSocketHandlers = (
 
         // ====================================================
         // Delete message
-        //
-        // deleteMessage() handles ownership.
         // ====================================================
 
         const deletedMessage =
@@ -532,6 +558,30 @@ export const registerSocketHandlers = (
 
         const conversationId =
           deletedMessage.conversationId.toString();
+
+        // ====================================================
+        // Get participants
+        // ====================================================
+
+        const conversation =
+          await ConversationModel.findById(
+            conversationId,
+          ).select(
+            "participants",
+          );
+
+        // ====================================================
+        // Invalidate conversation caches
+        // ====================================================
+
+        if (conversation) {
+          await invalidateUserConversationsCache(
+            conversation.participants.map(
+              (participantId) =>
+                participantId.toString(),
+            ),
+          );
+        }
 
         // ====================================================
         // Broadcast deletion
@@ -627,6 +677,30 @@ export const registerSocketHandlers = (
 
         const conversationId =
           message.conversationId.toString();
+
+        // ====================================================
+        // Get participants
+        // ====================================================
+
+        const conversation =
+          await ConversationModel.findById(
+            conversationId,
+          ).select(
+            "participants",
+          );
+
+        // ====================================================
+        // Invalidate conversation caches
+        // ====================================================
+
+        if (conversation) {
+          await invalidateUserConversationsCache(
+            conversation.participants.map(
+              (participantId) =>
+                participantId.toString(),
+            ),
+          );
+        }
 
         // ====================================================
         // Broadcast edited message
@@ -740,7 +814,7 @@ export const registerSocketHandlers = (
   );
 
   // ==========================================================
-  // Message Read
+  // Message Read - Single Message
   // ==========================================================
 
   socket.on(
@@ -777,6 +851,14 @@ export const registerSocketHandlers = (
 
         const conversationId =
           message.conversationId.toString();
+
+        // ====================================================
+        // Invalidate current user's conversation cache
+        // ====================================================
+
+        await invalidateUserConversationsCache([
+          userId,
+        ]);
 
         // ====================================================
         // Find sender ID
@@ -822,6 +904,343 @@ export const registerSocketHandlers = (
               error instanceof Error
                 ? error.message
                 : "Failed to mark message as read",
+          },
+        );
+      }
+    },
+  );
+
+  // ==========================================================
+  // Conversation Read
+  //
+  // Mark ALL unread messages in current conversation as read.
+  //
+  // This is responsible for sidebar unread count persistence.
+  // ==========================================================
+
+  socket.on(
+    "conversation:read",
+    async ({
+      conversationId,
+    }) => {
+      try {
+        console.log(
+          "conversation:read RECEIVED:",
+          {
+            conversationId,
+            userId,
+          },
+        );
+
+        // ====================================================
+        // Validate conversation ID
+        // ====================================================
+
+        if (!conversationId) {
+          socket.emit(
+            "conversation:error",
+            {
+              message:
+                "Conversation ID is required",
+
+              conversationId,
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
+        // Validate ObjectId
+        // ====================================================
+
+        if (
+          !Types.ObjectId.isValid(
+            conversationId,
+          )
+        ) {
+          socket.emit(
+            "conversation:error",
+            {
+              message:
+                "Invalid conversation ID",
+
+              conversationId,
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
+        // Validate user ID
+        // ====================================================
+
+        if (
+          !Types.ObjectId.isValid(
+            userId,
+          )
+        ) {
+          socket.emit(
+            "conversation:error",
+            {
+              message:
+                "Invalid user ID",
+
+              conversationId,
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
+        // Check membership
+        // ====================================================
+
+        const isMember =
+          await isConversationMember(
+            conversationId,
+            userId,
+          );
+
+        if (!isMember) {
+          socket.emit(
+            "conversation:error",
+            {
+              message:
+                "You are not a member of this conversation",
+
+              conversationId,
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
+        // Convert IDs
+        // ====================================================
+
+        const conversationObjectId =
+          new Types.ObjectId(
+            conversationId,
+          );
+
+        const userObjectId =
+          new Types.ObjectId(
+            userId,
+          );
+
+        // ====================================================
+        // Find unread normal messages
+        // ====================================================
+
+        const unreadMessages =
+          await MessageModel.find({
+            conversationId:
+              conversationObjectId,
+
+            senderId: {
+              $ne: userObjectId,
+            },
+
+            type: {
+              $ne: "system",
+            },
+
+            isDeleted: false,
+
+            readBy: {
+              $nin: [
+                userObjectId,
+              ],
+            },
+          })
+            .select(
+              "_id senderId",
+            )
+            .lean();
+
+        // ====================================================
+        // Nothing unread
+        // ====================================================
+
+        if (
+          unreadMessages.length ===
+          0
+        ) {
+          // Still invalidate cache.
+          //
+          // This protects us from stale Redis data.
+
+          await invalidateUserConversationsCache([
+            userId,
+          ]);
+
+          socket.emit(
+            "conversation:read:update",
+            {
+              conversationId,
+
+              userId,
+
+              messageIds: [],
+            },
+          );
+
+          return;
+        }
+
+        // ====================================================
+        // Message IDs
+        // ====================================================
+
+        const messageIds =
+          unreadMessages.map(
+            (message) =>
+              message._id.toString(),
+          );
+
+        // ====================================================
+        // Mark all unread messages as read
+        // ====================================================
+
+        const updateResult =
+          await MessageModel.updateMany(
+            {
+              _id: {
+                $in:
+                  unreadMessages.map(
+                    (message) =>
+                      message._id,
+                  ),
+              },
+
+              readBy: {
+                $nin: [
+                  userObjectId,
+                ],
+              },
+            },
+
+            {
+              $addToSet: {
+                readBy:
+                  userObjectId,
+              },
+            },
+          );
+
+        // ====================================================
+        // Debug information
+        // ====================================================
+
+        console.log(
+          "READ UPDATE RESULT:",
+          {
+            conversationId,
+            userId,
+            matchedCount:
+              updateResult.matchedCount,
+            modifiedCount:
+              updateResult.modifiedCount,
+            messageCount:
+              messageIds.length,
+          },
+        );
+
+        // ====================================================
+        // 🔥 IMPORTANT
+        //
+        // Remove stale conversation cache.
+        //
+        // Otherwise refresh may return old unreadCount.
+        // ====================================================
+
+        await invalidateUserConversationsCache([
+          userId,
+        ]);
+
+        console.log(
+          `Conversation cache invalidated for user: ${userId}`,
+        );
+
+        // ====================================================
+        // Notify current user
+        // ====================================================
+
+        socket.emit(
+          "conversation:read:update",
+          {
+            conversationId,
+
+            userId,
+
+            messageIds,
+          },
+        );
+
+        // ====================================================
+        // Find original senders
+        // ====================================================
+
+        const senderIds = [
+          ...new Set(
+            unreadMessages
+              .map((message) =>
+                message.senderId?.toString(),
+              )
+              .filter(
+                (
+                  senderId,
+                ): senderId is string =>
+                  Boolean(senderId) &&
+                  senderId !== userId,
+              ),
+          ),
+        ];
+
+        // ====================================================
+        // Notify senders
+        // ====================================================
+
+        for (
+          const senderId of
+            senderIds
+        ) {
+          io.to(
+            `user:${senderId}`,
+          ).emit(
+            "conversation:read:update",
+            {
+              conversationId,
+
+              userId,
+
+              messageIds,
+            },
+          );
+        }
+
+        console.log(
+          `Conversation ${conversationId}: ${messageIds.length} message(s) marked as read by user ${userId}`,
+        );
+      } catch (error) {
+        console.error(
+          "conversation:read error:",
+          error,
+        );
+
+        socket.emit(
+          "conversation:error",
+          {
+            message:
+              error instanceof Error
+                ? error.message
+                : "Failed to mark conversation as read",
+
+            conversationId,
           },
         );
       }
@@ -1034,5 +1453,3 @@ export const registerSocketHandlers = (
     },
   );
 };
-
- 

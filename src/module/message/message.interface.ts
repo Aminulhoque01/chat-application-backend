@@ -1,18 +1,21 @@
 import { Types } from "mongoose";
 
-export type AttachmentType = "image" | "video" | "file" | "audio";
+export type AttachmentType =
+  | "image"
+  | "video"
+  | "file"
+  | "audio";
+
+export type MessageType =
+  | "text"
+  | "system";
 
 export interface IAttachment {
   type: AttachmentType;
-
   url: string;
-
   publicId: string;
-
   fileName: string;
-
   mimeType: string;
-
   size: number;
 }
 
@@ -26,6 +29,8 @@ export interface IMessage {
   conversationId: Types.ObjectId;
 
   senderId: Types.ObjectId;
+
+  type: MessageType;
 
   text: string;
 
@@ -49,3 +54,4 @@ export interface IMessage {
 
   forwardedFrom?: Types.ObjectId | null;
 }
+

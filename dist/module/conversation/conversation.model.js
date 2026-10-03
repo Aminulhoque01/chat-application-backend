@@ -21,6 +21,13 @@ const conversationSchema = new mongoose_1.Schema({
         trim: true,
         maxlength: 100,
     },
+    // ==========================================
+    // GROUP PHOTO
+    // ==========================================
+    groupPhoto: {
+        type: String,
+        default: null,
+    },
     admins: [
         {
             type: mongoose_1.Schema.Types.ObjectId,

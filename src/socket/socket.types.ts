@@ -1,6 +1,10 @@
 import { Socket } from "socket.io";
 
 export interface ClientToServerEvents {
+  // ==========================================
+  // Conversation
+  // ==========================================
+
   "conversation:join": (payload: {
     conversationId: string;
   }) => void;
@@ -8,6 +12,21 @@ export interface ClientToServerEvents {
   "conversation:leave": (payload: {
     conversationId: string;
   }) => void;
+
+  /**
+   * Mark all unread messages of a conversation
+   * as read for the current user.
+   *
+   * This is triggered when the user opens/sees
+   * a conversation.
+   */
+  "conversation:read": (payload: {
+    conversationId: string;
+  }) => void;
+
+  // ==========================================
+  // Message
+  // ==========================================
 
   "message:send": (payload: {
     conversationId: string;
@@ -40,9 +59,18 @@ export interface ClientToServerEvents {
     messageId: string;
   }) => void;
 
+  /**
+   * Mark one specific message as read.
+   *
+   * Existing functionality remains.
+   */
   "message:read": (payload: {
     messageId: string;
   }) => void;
+
+  // ==========================================
+  // Typing
+  // ==========================================
 
   "typing:start": (payload: {
     conversationId: string;
@@ -69,6 +97,19 @@ export interface ServerToClientEvents {
   "conversation:error": (data: {
     message: string;
     conversationId?: string;
+  }) => void;
+
+  /**
+   * Sent after the current user marks all unread
+   * messages of a conversation as read.
+   *
+   * messageIds contains the messages that were
+   * actually changed in the database.
+   */
+  "conversation:read:update": (data: {
+    conversationId: string;
+    userId: string;
+    messageIds: string[];
   }) => void;
 
   // ==========================================
@@ -103,8 +144,12 @@ export interface ServerToClientEvents {
     messageId: string;
   }) => void;
 
+  /**
+   * Existing single-message read receipt.
+   */
   "message:read:update": (data: {
     messageId: string;
+    conversationId: string;
     userId: string;
   }) => void;
 
@@ -142,12 +187,10 @@ export interface ServerToClientEvents {
 }
 
 // ==========================================
-// Server to Server
+// Server To Server
 // ==========================================
 
-export interface InterServerEvents {
-  // Future server-to-server events
-}
+export interface InterServerEvents {}
 
 // ==========================================
 // Socket Data

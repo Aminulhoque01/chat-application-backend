@@ -14,7 +14,7 @@ const conversationSchema =
         required: true,
         index: true,
       },
-
+  
       participants: [
         {
           type: Schema.Types.ObjectId,
@@ -27,6 +27,15 @@ const conversationSchema =
         type: String,
         trim: true,
         maxlength: 100,
+      },
+
+         // ==========================================
+      // GROUP PHOTO
+      // ==========================================
+
+      groupPhoto: {
+        type: String,
+        default: null,
       },
 
       admins: [

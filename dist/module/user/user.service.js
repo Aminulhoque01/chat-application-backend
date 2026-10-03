@@ -1,18 +1,15 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getBlockStatus = exports.unblockUser = exports.blockUser = exports.setUserOffline = exports.setUserOnline = exports.updateUserAvatar = exports.updateUserProfile = exports.getUserById = exports.searchUsers = exports.getAllUsers = void 0;
+exports.setUserOffline = exports.setUserOnline = exports.updateUserAvatar = exports.updateUserProfile = exports.getUserById = exports.searchUsers = exports.getAllUsers = void 0;
 const mongoose_1 = require("mongoose");
 const cache_keys_1 = require("../../cache/cache.keys");
 const cache_service_1 = require("../../cache/cache.service");
 const user_model_1 = require("./user.model");
+const block_model_1 = require("../block/block.model");
 /**
+ * ==========================================
  * Get all users
- * Supports:
- * - search
- * - phone filter
- * - online filter
- * - pagination
- * - sorting
+ * ==========================================
  */
 const getAllUsers = async (query = {}) => {
     const { search, phone, isOnline, page = 1, limit = 20, sortBy = "name", sortOrder = "asc", } = query;
@@ -64,7 +61,7 @@ const getAllUsers = async (query = {}) => {
         [sortBy]: sortOrder === "desc" ? -1 : 1,
     };
     /**
-     * Query users + count together
+     * Get users + total
      */
     const [users, total] = await Promise.all([
         user_model_1.UserModel.find(filter)
@@ -90,10 +87,9 @@ const getAllUsers = async (query = {}) => {
 };
 exports.getAllUsers = getAllUsers;
 /**
+ * ==========================================
  * Search users
- *
- * This is optional because getAllUsers()
- * can already handle search.
+ * ==========================================
  */
 const searchUsers = async (query, page = 1, limit = 20) => {
     const regex = new RegExp(query, "i");
@@ -134,40 +130,141 @@ const searchUsers = async (query, page = 1, limit = 20) => {
 };
 exports.searchUsers = searchUsers;
 /**
+ * ==========================================
  * Get single user
+ *
+ * targetUserId = profile owner
+ * viewerUserId = currently logged-in user
+ *
+ * IMPORTANT:
+ * Redis stores only the base user.
+ * Block information is checked separately
+ * because block status depends on the viewer.
+ * ==========================================
  */
-const getUserById = async (userId) => {
-    const cacheKey = cache_keys_1.cacheKeys.userProfile(userId);
-    // 1. Check Redis
-    const cachedUser = await (0, cache_service_1.getCache)(cacheKey);
-    if (cachedUser) {
-        console.log("User profile: Redis HIT");
-        return cachedUser;
-    }
-    console.log("User profile: Redis MISS");
-    // 2. Get from MongoDB
-    const user = await user_model_1.UserModel.findById(userId)
-        .select("-__v");
-    if (!user) {
+const getUserById = async (targetUserId, viewerUserId) => {
+    if (!mongoose_1.Types.ObjectId.isValid(targetUserId)) {
         return null;
     }
-    // 3. Save to Redis
-    await (0, cache_service_1.setCache)(cacheKey, user, 300);
-    return user;
+    const cacheKey = cache_keys_1.cacheKeys.userProfile(targetUserId);
+    /**
+     * ========================================
+     * 1. Get base profile from Redis
+     * ========================================
+     */
+    let user = await (0, cache_service_1.getCache)(cacheKey);
+    if (user) {
+        console.log("User profile: Redis HIT");
+    }
+    else {
+        console.log("User profile: Redis MISS");
+        /**
+         * ======================================
+         * 2. Get user from MongoDB
+         * ======================================
+         */
+        user = await user_model_1.UserModel.findById(targetUserId).select("-__v").lean();
+        if (!user) {
+            return null;
+        }
+        /**
+         * ======================================
+         * 3. Cache only base user data
+         * ======================================
+         */
+        await (0, cache_service_1.setCache)(cacheKey, user, 300);
+    }
+    /**
+     * ========================================
+     * Own profile
+     * ========================================
+     */
+    if (!viewerUserId ||
+        !mongoose_1.Types.ObjectId.isValid(viewerUserId) ||
+        viewerUserId === targetUserId) {
+        return user;
+    }
+    const viewerId = new mongoose_1.Types.ObjectId(viewerUserId);
+    const targetId = new mongoose_1.Types.ObjectId(targetUserId);
+    /**
+     * ========================================
+     * 4. Check block relationship
+     *
+     * Direction 1:
+     *
+     * viewer blocks target
+     *
+     * Direction 2:
+     *
+     * target blocks viewer
+     * ========================================
+     */
+    const block = await block_model_1.BlockModel.findOne({
+        $or: [
+            {
+                blockerId: viewerId,
+                blockedId: targetId,
+            },
+            {
+                blockerId: targetId,
+                blockedId: viewerId,
+            },
+        ],
+    })
+        .select("blockerId blockedId")
+        .lean();
+    /**
+     * ========================================
+     * No block
+     * ========================================
+     */
+    if (!block) {
+        return user;
+    }
+    /**
+     * ========================================
+     * Block exists
+     *
+     * Hide presence information
+     * ========================================
+     */
+    const blockedByMe = block.blockerId.toString() === viewerUserId;
+    const blockedByOther = block.blockerId.toString() === targetUserId;
+    return {
+        ...user,
+        /**
+         * Hide online status
+         */
+        isOnline: false,
+        /**
+         * Hide last seen
+         */
+        lastSeen: null,
+        /**
+         * Block information
+         */
+        isBlocked: true,
+        blockedByMe,
+        blockedByOther,
+        /**
+         * ONLY blocker can unblock
+         */
+        canUnblock: blockedByMe,
+    };
 };
 exports.getUserById = getUserById;
 /**
+ * ==========================================
  * Update user profile
+ * ==========================================
  */
 const updateUserProfile = async (userId, data) => {
     const updateData = {};
     if (data.name !== undefined) {
-        updateData.name =
-            data.name.trim();
+        updateData.name = data.name.trim();
     }
     if (data.bio !== undefined) {
-        updateData.bio =
-            data.bio.trim();
+        updateData.bio = data.bio.trim();
     }
     const user = await user_model_1.UserModel.findByIdAndUpdate(userId, {
         $set: updateData,
@@ -175,11 +272,17 @@ const updateUserProfile = async (userId, data) => {
         new: true,
         runValidators: true,
     }).select("-__v");
+    /**
+     * Clear profile cache
+     */
+    await (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(userId));
     return user;
 };
 exports.updateUserProfile = updateUserProfile;
 /**
+ * ==========================================
  * Update avatar
+ * ==========================================
  */
 const updateUserAvatar = async (userId, avatarUrl) => {
     const user = await user_model_1.UserModel.findByIdAndUpdate(userId, {
@@ -190,9 +293,18 @@ const updateUserAvatar = async (userId, avatarUrl) => {
         new: true,
         runValidators: true,
     }).select("-__v");
+    /**
+     * Clear profile cache
+     */
+    await (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(userId));
     return user;
 };
 exports.updateUserAvatar = updateUserAvatar;
+/**
+ * ==========================================
+ * Set user online
+ * ==========================================
+ */
 const setUserOnline = async (userId) => {
     const user = await user_model_1.UserModel.findByIdAndUpdate(userId, {
         $set: {
@@ -201,9 +313,21 @@ const setUserOnline = async (userId) => {
     }, {
         new: true,
     });
+    /**
+     * IMPORTANT:
+     * Do not cache online state.
+     *
+     * Presence should come from DB/socket.
+     */
+    await (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(userId));
     return user;
 };
 exports.setUserOnline = setUserOnline;
+/**
+ * ==========================================
+ * Set user offline
+ * ==========================================
+ */
 const setUserOffline = async (userId) => {
     const user = await user_model_1.UserModel.findByIdAndUpdate(userId, {
         $set: {
@@ -213,114 +337,10 @@ const setUserOffline = async (userId) => {
     }, {
         new: true,
     });
+    /**
+     * Clear cached profile
+     */
+    await (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(userId));
     return user;
 };
 exports.setUserOffline = setUserOffline;
-const blockUser = async (currentUserId, targetUserId) => {
-    if (!mongoose_1.Types.ObjectId.isValid(currentUserId) ||
-        !mongoose_1.Types.ObjectId.isValid(targetUserId)) {
-        throw new Error("Invalid user ID");
-    }
-    if (currentUserId === targetUserId) {
-        throw new Error("You cannot block yourself");
-    }
-    const currentUserObjectId = new mongoose_1.Types.ObjectId(currentUserId);
-    const targetUserObjectId = new mongoose_1.Types.ObjectId(targetUserId);
-    const targetUser = await user_model_1.UserModel.findById(targetUserObjectId).select("_id");
-    if (!targetUser) {
-        throw new Error("User not found");
-    }
-    // Block in both directions
-    const [currentUser] = await Promise.all([
-        user_model_1.UserModel.findByIdAndUpdate(currentUserObjectId, {
-            $addToSet: {
-                blockedUsers: targetUserObjectId,
-            },
-        }, {
-            new: true,
-        }).select("blockedUsers"),
-        user_model_1.UserModel.findByIdAndUpdate(targetUserObjectId, {
-            $addToSet: {
-                blockedUsers: currentUserObjectId,
-            },
-        }).select("_id"),
-    ]);
-    if (!currentUser) {
-        throw new Error("User not found");
-    }
-    // Invalidate both users' profile cache
-    await Promise.all([
-        (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(currentUserId)),
-        (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(targetUserId)),
-    ]);
-    return currentUser;
-};
-exports.blockUser = blockUser;
-const unblockUser = async (currentUserId, targetUserId) => {
-    if (!mongoose_1.Types.ObjectId.isValid(currentUserId) ||
-        !mongoose_1.Types.ObjectId.isValid(targetUserId)) {
-        throw new Error("Invalid user ID");
-    }
-    if (currentUserId === targetUserId) {
-        throw new Error("You cannot unblock yourself");
-    }
-    const currentUserObjectId = new mongoose_1.Types.ObjectId(currentUserId);
-    const targetUserObjectId = new mongoose_1.Types.ObjectId(targetUserId);
-    const targetUser = await user_model_1.UserModel.findById(targetUserObjectId).select("_id");
-    if (!targetUser) {
-        throw new Error("User not found");
-    }
-    // Remove block in both directions
-    const [currentUser] = await Promise.all([
-        user_model_1.UserModel.findByIdAndUpdate(currentUserObjectId, {
-            $pull: {
-                blockedUsers: targetUserObjectId,
-            },
-        }, {
-            new: true,
-        }).select("blockedUsers"),
-        user_model_1.UserModel.findByIdAndUpdate(targetUserObjectId, {
-            $pull: {
-                blockedUsers: currentUserObjectId,
-            },
-        }).select("_id"),
-    ]);
-    if (!currentUser) {
-        throw new Error("User not found");
-    }
-    // Invalidate both users' profile cache
-    await Promise.all([
-        (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(currentUserId)),
-        (0, cache_service_1.deleteCache)(cache_keys_1.cacheKeys.userProfile(targetUserId)),
-    ]);
-    return currentUser;
-};
-exports.unblockUser = unblockUser;
-const getBlockStatus = async (currentUserId, targetUserId) => {
-    if (!mongoose_1.Types.ObjectId.isValid(currentUserId) ||
-        !mongoose_1.Types.ObjectId.isValid(targetUserId)) {
-        throw new Error("Invalid user ID");
-    }
-    if (currentUserId === targetUserId) {
-        throw new Error("You cannot check block status for yourself");
-    }
-    const currentUserObjectId = new mongoose_1.Types.ObjectId(currentUserId);
-    const targetUserObjectId = new mongoose_1.Types.ObjectId(targetUserId);
-    const [currentUser, targetUser] = await Promise.all([
-        user_model_1.UserModel.findById(currentUserObjectId).select("blockedUsers"),
-        user_model_1.UserModel.findById(targetUserObjectId).select("blockedUsers"),
-    ]);
-    if (!currentUser) {
-        throw new Error("User not found");
-    }
-    if (!targetUser) {
-        throw new Error("User not found");
-    }
-    const currentUserBlockedTarget = currentUser.blockedUsers.some((id) => id.toString() === targetUserId);
-    const targetUserBlockedCurrent = targetUser.blockedUsers.some((id) => id.toString() === currentUserId);
-    return {
-        isBlocked: currentUserBlockedTarget ||
-            targetUserBlockedCurrent,
-    };
-};
-exports.getBlockStatus = getBlockStatus;

@@ -4,12 +4,15 @@ import {
   addParticipants,
   createConversation,
   createGroup,
+  deleteGroup,
   getConversations,
   promoteAdmin,
   removeParticipant,
   renameGroup,
+  updateGroupPhotoController,
 } from "./conversation.controller";
 import { authMiddleware } from "../../middleware/auth.middleware";
+import { uploadAvatar } from "../../middleware/upload.middleware";
 
  
 
@@ -62,6 +65,25 @@ conversationRouter.patch(
   "/:id",
   authMiddleware,
   renameGroup,
+);
+
+
+conversationRouter.patch(
+  "/:id/photo",
+  authMiddleware,
+  uploadAvatar.single(
+    "photo",
+  ),
+  updateGroupPhotoController,
+);
+
+/**
+ * Delete group
+ */
+conversationRouter.delete(
+  "/:id",
+  authMiddleware,
+  deleteGroup,
 );
 
 export default conversationRouter;

@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { addParticipantsSchema, createDirectConversationSchema, createGroupSchema, promoteAdminSchema, renameGroupSchema } from "./conversation.validation";
-import { addParticipantsToGroup, createDirectConversation, createGroupConversation, getMyConversations, promoteMemberToAdmin, removeParticipantFromGroup, renameGroupConversation } from "./conversation.service";
+import { addParticipantsToGroup, createDirectConversation, createGroupConversation, deleteGroupConversation, getMyConversations, promoteMemberToAdmin, removeParticipantFromGroup, renameGroupConversation, updateGroupPhoto } from "./conversation.service";
  
 
 
@@ -432,3 +432,156 @@ export const renameGroup = async (
     });
   }
 };
+
+
+export const updateGroupPhotoController =
+  async (
+    req: Request,
+    res: Response,
+  ) => {
+    try {
+      // ==========================================
+      // CURRENT USER
+      // ==========================================
+
+      const currentUserId =
+        req.user?.userId;
+
+      if (!currentUserId) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      // ==========================================
+      // CONVERSATION ID
+      // ==========================================
+
+      const { id } =
+        req.params;
+
+      if (!id) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Conversation ID is required",
+        });
+      }
+
+      // ==========================================
+      // FILE
+      // ==========================================
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Group photo is required",
+        });
+      }
+
+      // ==========================================
+      // UPDATE PHOTO
+      // ==========================================
+
+      const conversation =
+        await updateGroupPhoto(
+          currentUserId,
+          id as string,
+          req.file,
+        );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Group photo updated successfully",
+        data: conversation,
+      });
+    } catch (error) {
+      console.error(
+        "Update group photo error:",
+        error,
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to update group photo";
+
+      return res.status(400).json({
+        success: false,
+        message,
+      });
+    }
+  };
+
+
+  export const deleteGroup =
+  async (
+    req: Request,
+    res: Response,
+  ) => {
+    try {
+      // ==========================================
+      // CURRENT USER
+      // ==========================================
+
+      const currentUserId =
+        req.user?.userId;
+
+      if (!currentUserId) {
+        return res.status(401).json({
+          success: false,
+          message: "Unauthorized",
+        });
+      }
+
+      // ==========================================
+      // CONVERSATION ID
+      // ==========================================
+
+      const { id } =
+        req.params;
+
+      if (!id) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Conversation ID is required",
+        });
+      }
+
+      // ==========================================
+      // DELETE GROUP
+      // ==========================================
+
+      const result =
+        await deleteGroupConversation(
+          currentUserId,
+          id as string,
+        );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Group deleted successfully",
+        data: result,
+      });
+    } catch (error) {
+      console.error(
+        "Delete group error:",
+        error,
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to delete group";
+
+      return res.status(400).json({
+        success: false,
+        message,
+      });
+    }
+  };

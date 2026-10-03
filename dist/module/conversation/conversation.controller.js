@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.renameGroup = exports.promoteAdmin = exports.removeParticipant = exports.addParticipants = exports.createGroup = exports.getConversations = exports.createConversation = void 0;
+exports.deleteGroup = exports.updateGroupPhotoController = exports.renameGroup = exports.promoteAdmin = exports.removeParticipant = exports.addParticipants = exports.createGroup = exports.getConversations = exports.createConversation = void 0;
 const conversation_validation_1 = require("./conversation.validation");
 const conversation_service_1 = require("./conversation.service");
 const createConversation = async (req, res) => {
@@ -277,3 +277,100 @@ const renameGroup = async (req, res) => {
     }
 };
 exports.renameGroup = renameGroup;
+const updateGroupPhotoController = async (req, res) => {
+    try {
+        // ==========================================
+        // CURRENT USER
+        // ==========================================
+        const currentUserId = req.user?.userId;
+        if (!currentUserId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+        // ==========================================
+        // CONVERSATION ID
+        // ==========================================
+        const { id } = req.params;
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: "Conversation ID is required",
+            });
+        }
+        // ==========================================
+        // FILE
+        // ==========================================
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: "Group photo is required",
+            });
+        }
+        // ==========================================
+        // UPDATE PHOTO
+        // ==========================================
+        const conversation = await (0, conversation_service_1.updateGroupPhoto)(currentUserId, id, req.file);
+        return res.status(200).json({
+            success: true,
+            message: "Group photo updated successfully",
+            data: conversation,
+        });
+    }
+    catch (error) {
+        console.error("Update group photo error:", error);
+        const message = error instanceof Error
+            ? error.message
+            : "Failed to update group photo";
+        return res.status(400).json({
+            success: false,
+            message,
+        });
+    }
+};
+exports.updateGroupPhotoController = updateGroupPhotoController;
+const deleteGroup = async (req, res) => {
+    try {
+        // ==========================================
+        // CURRENT USER
+        // ==========================================
+        const currentUserId = req.user?.userId;
+        if (!currentUserId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+        // ==========================================
+        // CONVERSATION ID
+        // ==========================================
+        const { id } = req.params;
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: "Conversation ID is required",
+            });
+        }
+        // ==========================================
+        // DELETE GROUP
+        // ==========================================
+        const result = await (0, conversation_service_1.deleteGroupConversation)(currentUserId, id);
+        return res.status(200).json({
+            success: true,
+            message: "Group deleted successfully",
+            data: result,
+        });
+    }
+    catch (error) {
+        console.error("Delete group error:", error);
+        const message = error instanceof Error
+            ? error.message
+            : "Failed to delete group";
+        return res.status(400).json({
+            success: false,
+            message,
+        });
+    }
+};
+exports.deleteGroup = deleteGroup;

@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.blockStatus = exports.unblockUserController = exports.blockUserController = exports.updateAvatar = exports.updateProfile = exports.getUserProfile = exports.searchUser = exports.getAllUser = void 0;
+exports.getUserByIdController = exports.updateAvatar = exports.updateProfile = exports.getUserProfile = exports.searchUser = exports.getAllUser = void 0;
 const mongoose_1 = __importDefault(require("mongoose"));
 const user_service_1 = require("./user.service");
 const cloudinary_1 = require("../../utils/cloudinary");
@@ -265,118 +265,51 @@ const updateAvatar = async (req, res) => {
     }
 };
 exports.updateAvatar = updateAvatar;
-const blockUserController = async (req, res) => {
+const getUserByIdController = async (req, res) => {
     try {
-        if (!req.user?.userId) {
-            return res.status(401).json({
-                success: false,
-                message: "Unauthorized",
-            });
-        }
-        const currentUserId = req.user.userId;
-        const { id: targetUserId } = req.params;
-        if (!mongoose_1.default.Types.ObjectId.isValid(targetUserId)) {
+        const { id: userId, } = req.params;
+        /**
+         * ======================================
+         * Validate target user ID
+         * ======================================
+         */
+        if (!mongoose_1.default.Types.ObjectId.isValid(userId)) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid user ID",
             });
         }
-        await (0, user_service_1.blockUser)(currentUserId, targetUserId);
-        return res.status(200).json({
-            success: true,
-            message: "User blocked successfully",
-        });
-    }
-    catch (error) {
-        console.error("Block user error:", error);
-        const message = error instanceof Error
-            ? error.message
-            : "Failed to block user";
-        if (message === "User not found") {
+        /**
+         * ======================================
+         * Current logged-in user
+         * ======================================
+         */
+        const viewerUserId = req.user?.userId;
+        /**
+         * ======================================
+         * Get block-aware profile
+         * ======================================
+         */
+        const user = await (0, user_service_1.getUserById)(userId, viewerUserId);
+        if (!user) {
             return res.status(404).json({
                 success: false,
-                message,
+                message: "User not found",
             });
         }
-        if (message ===
-            "You cannot block yourself") {
-            return res.status(400).json({
-                success: false,
-                message,
-            });
-        }
-        return res.status(500).json({
-            success: false,
-            message,
-        });
-    }
-};
-exports.blockUserController = blockUserController;
-const unblockUserController = async (req, res) => {
-    try {
-        if (!req.user?.userId) {
-            return res.status(401).json({
-                success: false,
-                message: "Unauthorized",
-            });
-        }
-        const currentUserId = req.user.userId;
-        const { id: targetUserId } = req.params;
-        if (!mongoose_1.default.Types.ObjectId.isValid(targetUserId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid user ID",
-            });
-        }
-        await (0, user_service_1.unblockUser)(currentUserId, targetUserId);
         return res.status(200).json({
             success: true,
-            message: "User unblocked successfully",
+            data: user,
         });
     }
     catch (error) {
-        console.error("Unblock user error:", error);
-        const message = error instanceof Error
-            ? error.message
-            : "Failed to unblock user";
+        console.error("Get user by ID error:", error);
         return res.status(500).json({
             success: false,
-            message,
+            message: error instanceof Error
+                ? error.message
+                : "Failed to get user",
         });
     }
 };
-exports.unblockUserController = unblockUserController;
-const blockStatus = async (req, res) => {
-    try {
-        if (!req.user?.userId) {
-            return res.status(401).json({
-                success: false,
-                message: "Unauthorized",
-            });
-        }
-        const currentUserId = req.user.userId;
-        const { id: targetUserId } = req.params;
-        if (!mongoose_1.default.Types.ObjectId.isValid(targetUserId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid user ID",
-            });
-        }
-        const result = await (0, user_service_1.getBlockStatus)(currentUserId, targetUserId);
-        return res.status(200).json({
-            success: true,
-            data: result,
-        });
-    }
-    catch (error) {
-        console.error("Get block status error:", error);
-        const message = error instanceof Error
-            ? error.message
-            : "Failed to get block status";
-        return res.status(500).json({
-            success: false,
-            message,
-        });
-    }
-};
-exports.blockStatus = blockStatus;
+exports.getUserByIdController = getUserByIdController;

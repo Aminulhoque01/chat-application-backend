@@ -53,8 +53,5 @@ userRouter.patch("/me/avatar", auth_middleware_1.authMiddleware, upload_middlewa
  *
  * GET /api/users/:id
  */
-userRouter.get("/:id", user_controller_1.getUserProfile);
-userRouter.post("/:id/block", auth_middleware_1.authMiddleware, user_controller_1.blockUserController);
-userRouter.delete("/:id/block", auth_middleware_1.authMiddleware, user_controller_1.unblockUserController);
-userRouter.get("/:id/block-status", auth_middleware_1.authMiddleware, user_controller_1.blockStatus);
+userRouter.get("/:id", user_controller_1.getUserByIdController);
 exports.default = userRouter;

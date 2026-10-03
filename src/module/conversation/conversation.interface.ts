@@ -6,7 +6,7 @@ export interface IConversation {
   _id?: Types.ObjectId;
 
   type: ConversationType;
-
+   groupPhoto?: string;
   participants: Types.ObjectId[];
 
   // Group only

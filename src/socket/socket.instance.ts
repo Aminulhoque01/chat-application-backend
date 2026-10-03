@@ -14,18 +14,23 @@ type SocketServer = Server<
   SocketData
 >;
 
-let socketIO: SocketServer | null =
-  null;
+let socketIO: SocketServer | null = null;
 
-export const setSocketIO = (
-  io: SocketServer,
-) => {
+// ==========================================
+// SET SOCKET.IO INSTANCE
+// ==========================================
+
+export const setSocketIO = (io: SocketServer) => {
   socketIO = io;
 
   console.log(
     "Socket.IO instance stored",
   );
 };
+
+// ==========================================
+// GET SOCKET.IO INSTANCE
+// ==========================================
 
 export const getSocketIO = (): SocketServer => {
   if (!socketIO) {
