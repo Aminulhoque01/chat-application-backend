@@ -21,8 +21,7 @@ const getRequiredEnv = (
 
 export const env = {
   NODE_ENV:
-    process.env.NODE_ENV ??
-    "development",
+    process.env.NODE_ENV ?? "development",
 
   PORT: Number(
     process.env.PORT ?? 5000
@@ -38,8 +37,7 @@ export const env = {
     getRequiredEnv("JWT_SECRET"),
 
   JWT_EXPIRES_IN:
-    process.env.JWT_EXPIRES_IN ??
-    "7d",
+    process.env.JWT_EXPIRES_IN ?? "7d",
 
   CLIENT_URL:
     process.env.CLIENT_URL ??
@@ -59,5 +57,21 @@ export const env = {
   CLOUDINARY_API_SECRET:
     getRequiredEnv(
       "CLOUDINARY_API_SECRET"
+    ),
+
+  // Firebase
+  FIREBASE_PROJECT_ID:
+    getRequiredEnv(
+      "FIREBASE_PROJECT_ID"
+    ),
+
+  FIREBASE_CLIENT_EMAIL:
+    getRequiredEnv(
+      "FIREBASE_CLIENT_EMAIL"
+    ),
+
+  FIREBASE_PRIVATE_KEY:
+    getRequiredEnv(
+      "FIREBASE_PRIVATE_KEY"
     ),
 };
