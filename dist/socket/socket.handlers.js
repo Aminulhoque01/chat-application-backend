@@ -233,15 +233,43 @@ const registerSocketHandlers = (io, socket) => {
             const result = await (0, message_service_1.addReaction)(userId, messageId, emoji);
             const conversationId = result.message.conversationId.toString();
             // ====================================================
-            // Broadcast reaction update
+            // Reaction target / original message sender
             // ====================================================
-            io.to(conversationId).emit("message:reaction:update", {
+            // The original sender must receive the reaction event
+            // even when they are NOT inside the conversation room.
+            // Their personal room is always available.
+            // ====================================================
+            const targetUserId = typeof result.message.senderId ===
+                "string"
+                ? result.message.senderId
+                : result.message.senderId.toString();
+            // Same event ID is used for conversation + personal
+            // delivery so the frontend can safely deduplicate it.
+            const eventId = `${result.message._id.toString()}:${userId}:${Date.now()}`;
+            const reactionPayload = {
+                eventId,
                 messageId: result.message._id.toString(),
                 conversationId,
                 action: result.action,
+                reactorId: userId,
+                targetUserId,
                 reactionSummary: result.reactionSummary,
-            });
-            console.log(`Reaction ${result.action}:`, emoji, `on message ${messageId}`);
+            };
+            // ====================================================
+            // 1. Users currently inside the conversation
+            // ====================================================
+            io.to(conversationId).emit("message:reaction:update", reactionPayload);
+            // ====================================================
+            // 2. Original message sender's personal room
+            // ====================================================
+            // If the sender is in another chat (or has not joined
+            // this conversation), this is what delivers the event.
+            // Do not send a personal event to the reactor.
+            // ====================================================
+            if (targetUserId !== userId) {
+                io.to(`user:${targetUserId}`).emit("message:reaction:update", reactionPayload);
+            }
+            console.log(`Reaction ${result.action}:`, emoji, `on message ${messageId} by user ${userId}; target=${targetUserId}`);
         }
         catch (error) {
             console.error("message:reaction error:", error);
