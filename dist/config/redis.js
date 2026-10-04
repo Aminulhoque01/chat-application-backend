@@ -5,6 +5,14 @@ const redis_1 = require("redis");
 const env_1 = require("./env");
 exports.redisClient = (0, redis_1.createClient)({
     url: env_1.env.REDIS_URL,
+    socket: {
+        reconnectStrategy: (retries) => {
+            if (retries > 10) {
+                return new Error("Redis reconnect failed");
+            }
+            return Math.min(retries * 500, 3000);
+        },
+    },
 });
 exports.redisClient.on("error", (error) => {
     console.error("Redis Client Error:", error);
@@ -17,6 +25,9 @@ exports.redisClient.on("ready", () => {
 });
 exports.redisClient.on("reconnecting", () => {
     console.log("Redis reconnecting...");
+});
+exports.redisClient.on("end", () => {
+    console.log("Redis connection ended");
 });
 const connectRedis = async () => {
     if (exports.redisClient.isOpen) {

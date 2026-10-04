@@ -1,9 +1,17 @@
 import { createClient } from "redis";
-
 import { env } from "./env";
 
 export const redisClient = createClient({
   url: env.REDIS_URL,
+  socket: {
+    reconnectStrategy: (retries) => {
+      if (retries > 10) {
+        return new Error("Redis reconnect failed");
+      }
+
+      return Math.min(retries * 500, 3000);
+    },
+  },
 });
 
 redisClient.on("error", (error) => {
@@ -20,6 +28,10 @@ redisClient.on("ready", () => {
 
 redisClient.on("reconnecting", () => {
   console.log("Redis reconnecting...");
+});
+
+redisClient.on("end", () => {
+  console.log("Redis connection ended");
 });
 
 export const connectRedis = async (): Promise<void> => {

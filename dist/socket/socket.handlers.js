@@ -81,6 +81,19 @@ const isDirectConversationBlocked = async (conversationId, currentUserId) => {
 const registerSocketHandlers = (io, socket) => {
     const userId = socket.data.userId;
     // ==========================================================
+    // PERSONAL USER ROOM
+    // ==========================================================
+    //
+    // Every connected user joins a private room like:
+    // user:<userId>
+    //
+    // This is important because a user may NOT have joined a
+    // conversation room yet. The first message of a brand-new
+    // conversation must still reach that user.
+    // ==========================================================
+    socket.join(`user:${userId}`);
+    console.log(`User ${userId} joined personal socket room: user:${userId}`);
+    // ==========================================================
     // User Online
     // ==========================================================
     (0, user_service_1.setUserOnline)(userId)
