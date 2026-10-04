@@ -8,17 +8,18 @@ import messageRouter from "./module/message/message.route";
 import notificationRouter from "./module/notification/notification.route";
 import blockRouter from "./module/block/block.route";
 
+import { env } from "./config/env";
+
 const app = express();
 
 app.use(
   cors({
-    origin: true,
+    origin: env.CLIENT_URL,
     credentials: true,
   }),
 );
 
 app.use(express.json());
-
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/health", (_req, res) => {

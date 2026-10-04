@@ -11,9 +11,10 @@ const conversation_route_1 = __importDefault(require("./module/conversation/conv
 const message_route_1 = __importDefault(require("./module/message/message.route"));
 const notification_route_1 = __importDefault(require("./module/notification/notification.route"));
 const block_route_1 = __importDefault(require("./module/block/block.route"));
+const env_1 = require("./config/env");
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)({
-    origin: true,
+    origin: env_1.env.CLIENT_URL,
     credentials: true,
 }));
 app.use(express_1.default.json());
