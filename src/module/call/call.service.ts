@@ -2,10 +2,7 @@
 import { Types } from "mongoose";
 
 import { Call } from "./call.model";
-import type {
-  CallStatus,
-  CallType,
-} from "./call.interface";
+import type { CallStatus, CallType } from "./call.interface";
 
 interface CreateCallPayload {
   caller: string;
@@ -13,10 +10,8 @@ interface CreateCallPayload {
   type: CallType;
 }
 
-const ACTIVE_STATUSES: CallStatus[] = [
-  "ringing",
-  "accepted",
-];
+const ACTIVE_STATUSES: CallStatus[] = ["ringing", "accepted"];
+const RING_TIMEOUT_MS = 30_000;
 
 const isValidObjectId = (id: string) =>
   Types.ObjectId.isValid(id);
@@ -45,9 +40,37 @@ const isParticipant = (
   call.caller.toString() === userId ||
   call.receiver.toString() === userId;
 
-const createCall = async (
-  payload: CreateCallPayload,
+/**
+ * A ringing call is considered missed after 30 seconds.
+ * This is a fallback in case the in-memory timeout never runs,
+ * for example when the server restarts.
+ */
+const expireStaleRingingCalls = async (
+  userIds: string[],
 ) => {
+  const cutoff = new Date(Date.now() - RING_TIMEOUT_MS);
+  const objectIds = userIds.map((id) => new Types.ObjectId(id));
+
+  await Call.updateMany(
+    {
+      status: "ringing",
+      createdAt: { $lte: cutoff },
+      $or: [
+        { caller: { $in: objectIds } },
+        { receiver: { $in: objectIds } },
+      ],
+    },
+    {
+      $set: {
+        status: "missed",
+        endedAt: new Date(),
+        duration: 0,
+      },
+    },
+  );
+};
+
+const createCall = async (payload: CreateCallPayload) => {
   const { caller, receiver, type } = payload;
 
   if (
@@ -65,17 +88,26 @@ const createCall = async (
     throw new Error("Invalid call type");
   }
 
-  // Do not allow another active call involving either user.
+  // Clean up expired ringing calls before checking for active calls.
+  await expireStaleRingingCalls([caller, receiver]);
+
+  const userIds = [
+    new Types.ObjectId(caller),
+    new Types.ObjectId(receiver),
+  ];
+
   const activeCall = await Call.findOne({
     status: { $in: ACTIVE_STATUSES },
     $or: [
-      { caller: { $in: [caller, receiver] } },
-      { receiver: { $in: [caller, receiver] } },
+      { caller: { $in: userIds } },
+      { receiver: { $in: userIds } },
     ],
   });
 
   if (activeCall) {
-    throw new Error("One of the users is already in a call");
+    throw new Error(
+      "One of the users is already in a call. Please end the existing call first.",
+    );
   }
 
   return Call.create({
@@ -86,10 +118,7 @@ const createCall = async (
   });
 };
 
-const acceptCall = async (
-  callId: string,
-  userId: string,
-) => {
+const acceptCall = async (callId: string, userId: string) => {
   if (!isValidObjectId(userId)) {
     throw new Error("Invalid user ID");
   }
@@ -107,7 +136,7 @@ const acceptCall = async (
   const updatedCall = await Call.findOneAndUpdate(
     {
       _id: callId,
-      receiver: userId,
+      receiver: new Types.ObjectId(userId),
       status: "ringing",
     },
     {
@@ -126,28 +155,15 @@ const acceptCall = async (
   return updatedCall;
 };
 
-const rejectCall = async (
-  callId: string,
-  userId: string,
-) => {
+const rejectCall = async (callId: string, userId: string) => {
   if (!isValidObjectId(userId)) {
     throw new Error("Invalid user ID");
-  }
-
-  const call = await getCallById(callId);
-
-  if (call.receiver.toString() !== userId) {
-    throw new Error("Only the receiver can reject this call");
-  }
-
-  if (call.status !== "ringing") {
-    throw new Error("This call is no longer ringing");
   }
 
   const updatedCall = await Call.findOneAndUpdate(
     {
       _id: callId,
-      receiver: userId,
+      receiver: new Types.ObjectId(userId),
       status: "ringing",
     },
     {
@@ -161,34 +177,27 @@ const rejectCall = async (
   );
 
   if (!updatedCall) {
-    throw new Error("Call could not be rejected");
+    const call = await getCallById(callId);
+
+    if (call.receiver.toString() !== userId) {
+      throw new Error("Only the receiver can reject this call");
+    }
+
+    throw new Error("This call is no longer ringing");
   }
 
   return updatedCall;
 };
 
-const cancelCall = async (
-  callId: string,
-  userId: string,
-) => {
+const cancelCall = async (callId: string, userId: string) => {
   if (!isValidObjectId(userId)) {
     throw new Error("Invalid user ID");
-  }
-
-  const call = await getCallById(callId);
-
-  if (call.caller.toString() !== userId) {
-    throw new Error("Only the caller can cancel this call");
-  }
-
-  if (call.status !== "ringing") {
-    throw new Error("Only ringing calls can be cancelled");
   }
 
   const updatedCall = await Call.findOneAndUpdate(
     {
       _id: callId,
-      caller: userId,
+      caller: new Types.ObjectId(userId),
       status: "ringing",
     },
     {
@@ -202,38 +211,62 @@ const cancelCall = async (
   );
 
   if (!updatedCall) {
-    throw new Error("Call could not be cancelled");
+    const call = await getCallById(callId);
+
+    if (call.caller.toString() !== userId) {
+      throw new Error("Only the caller can cancel this call");
+    }
+
+    throw new Error("Only ringing calls can be cancelled");
   }
 
   return updatedCall;
 };
 
-const completeCall = async (
-  callId: string,
-  userId: string,
-) => {
+const completeCall = async (callId: string, userId: string) => {
   if (!isValidObjectId(userId)) {
     throw new Error("Invalid user ID");
   }
 
-  const call = await getCallById(callId);
-
-  if (!isParticipant(call, userId)) {
-    throw new Error("You are not a participant in this call");
+  if (!isValidObjectId(callId)) {
+    throw new Error("Invalid call ID");
   }
 
-  if (!ACTIVE_STATUSES.includes(call.status)) {
-    throw new Error("This call has already ended");
+  // Atomic update prevents two participants ending the same call
+  // at the same time and overwriting each other's result.
+  const existingCall = await Call.findOne({
+    _id: new Types.ObjectId(callId),
+    $or: [
+      { caller: new Types.ObjectId(userId) },
+      { receiver: new Types.ObjectId(userId) },
+    ],
+    status: { $in: ACTIVE_STATUSES },
+  });
+
+  if (!existingCall) {
+    const call = await getCallById(callId);
+
+    if (!isParticipant(call, userId)) {
+      throw new Error("You are not a participant in this call");
+    }
+
+    // Idempotent end: if it is already closed, return its final record.
+    // The socket handler should avoid creating duplicate history.
+    if (!ACTIVE_STATUSES.includes(call.status)) {
+      return call;
+    }
+
+    throw new Error("Call could not be ended");
   }
 
   const endedAt = new Date();
 
-  const duration = call.answeredAt
+  const duration = existingCall.answeredAt
     ? Math.max(
         0,
         Math.floor(
           (endedAt.getTime() -
-            call.answeredAt.getTime()) /
+            existingCall.answeredAt.getTime()) /
             1000,
         ),
       )
@@ -241,7 +274,7 @@ const completeCall = async (
 
   const updatedCall = await Call.findOneAndUpdate(
     {
-      _id: callId,
+      _id: new Types.ObjectId(callId),
       status: { $in: ACTIVE_STATUSES },
     },
     {
@@ -254,11 +287,74 @@ const completeCall = async (
     { new: true },
   );
 
-  if (!updatedCall) {
-    throw new Error("Call has already ended");
+  if (updatedCall) return updatedCall;
+
+  // Another participant may have ended the call concurrently.
+  const finalCall = await getCallById(callId);
+
+  if (!isParticipant(finalCall, userId)) {
+    throw new Error("You are not a participant in this call");
   }
 
-  return updatedCall;
+  return finalCall;
+};
+
+/**
+ * End active calls for a user whose last socket has disconnected.
+ * Ringing calls become missed; accepted calls become completed.
+ */
+const endActiveCallsForUser = async (userId: string) => {
+  if (!isValidObjectId(userId)) {
+    throw new Error("Invalid user ID");
+  }
+
+  const userObjectId = new Types.ObjectId(userId);
+
+  const activeCalls = await Call.find({
+    status: { $in: ACTIVE_STATUSES },
+    $or: [
+      { caller: userObjectId },
+      { receiver: userObjectId },
+    ],
+  });
+
+  const results = [];
+
+  for (const activeCall of activeCalls) {
+    const endedAt = new Date();
+    const wasAccepted = activeCall.status === "accepted";
+
+    const duration =
+      wasAccepted && activeCall.answeredAt
+        ? Math.max(
+            0,
+            Math.floor(
+              (endedAt.getTime() -
+                activeCall.answeredAt.getTime()) /
+                1000,
+            ),
+          )
+        : 0;
+
+    const updatedCall = await Call.findOneAndUpdate(
+      {
+        _id: activeCall._id,
+        status: { $in: ACTIVE_STATUSES },
+      },
+      {
+        $set: {
+          status: wasAccepted ? "completed" : "missed",
+          endedAt,
+          duration,
+        },
+      },
+      { new: true },
+    );
+
+    if (updatedCall) results.push(updatedCall);
+  }
+
+  return results;
 };
 
 const getUserCalls = async (
@@ -280,8 +376,8 @@ const getUserCalls = async (
 
   const filter = {
     $or: [
-      { caller: userId },
-      { receiver: userId },
+      { caller: new Types.ObjectId(userId) },
+      { receiver: new Types.ObjectId(userId) },
     ],
   };
 
@@ -310,17 +406,21 @@ const getUserCalls = async (
   };
 };
 
-
 const updateCallStatus = async (
   callId: string,
-  status: "accepted" | "rejected" | "cancelled" |"missed",
+  status: "accepted" | "rejected" | "cancelled" | "missed",
 ) => {
+  if (!isValidObjectId(callId)) {
+    throw new Error("Invalid call ID");
+  }
+
   const updateData: Record<string, unknown> = { status };
 
   if (status === "accepted") {
     updateData.answeredAt = new Date();
   } else {
     updateData.endedAt = new Date();
+    updateData.duration = 0;
   }
 
   return Call.findOneAndUpdate(
@@ -339,6 +439,7 @@ export const callService = {
   rejectCall,
   cancelCall,
   completeCall,
+  endActiveCallsForUser,
   getUserCalls,
-  updateCallStatus
+  updateCallStatus,
 };

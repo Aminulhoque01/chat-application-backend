@@ -1,6 +1,4 @@
 "use strict";
-// import { Server } from "socket.io";
-// import { Types } from "mongoose";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerSocketHandlers = void 0;
 const mongoose_1 = require("mongoose");
@@ -13,6 +11,13 @@ const block_model_1 = require("../module/block/block.model");
 const cache_service_1 = require("../cache/cache.service");
 const call_service_1 = require("../module/call/call.service");
 const call_model_1 = require("../module/call/call.model");
+const PERSONAL_ROOM = (userId) => `user:${userId}`;
+const isValidObjectId = (value) => typeof value === "string" && mongoose_1.Types.ObjectId.isValid(value);
+const getErrorMessage = (error, fallback) => error instanceof Error ? error.message : fallback;
+const isActiveCallStatus = (status) => status === "ringing" || status === "accepted";
+// ==========================================================
+// DIRECT CONVERSATION BLOCK CHECK
+// ==========================================================
 const isDirectConversationBlocked = async (conversationId, currentUserId) => {
     if (!mongoose_1.Types.ObjectId.isValid(conversationId)) {
         throw new Error("Invalid conversation ID");
@@ -20,9 +25,10 @@ const isDirectConversationBlocked = async (conversationId, currentUserId) => {
     if (!mongoose_1.Types.ObjectId.isValid(currentUserId)) {
         throw new Error("Invalid current user ID");
     }
+    const currentUserObjectId = new mongoose_1.Types.ObjectId(currentUserId);
     const conversation = await conversation_model_1.ConversationModel.findOne({
         _id: new mongoose_1.Types.ObjectId(conversationId),
-        participants: new mongoose_1.Types.ObjectId(currentUserId),
+        participants: currentUserObjectId,
     }).select("type participants");
     if (!conversation) {
         throw new Error("Conversation not found or you are not a member");
@@ -33,57 +39,65 @@ const isDirectConversationBlocked = async (conversationId, currentUserId) => {
     if (!otherParticipantId) {
         throw new Error("Direct conversation participant not found");
     }
-    const blockExists = await block_model_1.BlockModel.exists({
+    const blocked = await block_model_1.BlockModel.exists({
         $or: [
             {
-                blockerId: new mongoose_1.Types.ObjectId(currentUserId),
+                blockerId: currentUserObjectId,
                 blockedId: otherParticipantId,
             },
             {
                 blockerId: otherParticipantId,
-                blockedId: new mongoose_1.Types.ObjectId(currentUserId),
+                blockedId: currentUserObjectId,
             },
         ],
     });
-    return Boolean(blockExists);
+    return Boolean(blocked);
 };
+// ==========================================================
+// SOCKET HANDLERS
+// ==========================================================
 const registerSocketHandlers = (io, socket) => {
     const userId = socket.data.userId;
-    socket.join(`user:${userId}`);
-    console.log(`User ${userId} joined personal socket room`);
+    socket.join(PERSONAL_ROOM(userId));
+    console.log(`Socket connected: ${socket.id} | userId: ${userId}`);
     (0, user_service_1.setUserOnline)(userId).catch((error) => {
         console.error("Failed to set user online:", error);
     });
     // ==========================================================
     // CALL HELPERS
     // ==========================================================
+    const emitCallError = (message) => {
+        socket.emit("call:error", { message });
+    };
     const getCallDetails = async (callId) => {
-        if (!mongoose_1.Types.ObjectId.isValid(callId))
+        if (!isValidObjectId(callId))
             return null;
-        const call = await call_model_1.Call.findById(callId).select("caller receiver status type");
+        const call = await call_model_1.Call.findById(callId).select("caller receiver status type duration");
         if (!call)
             return null;
         return {
             call,
             callerId: call.caller.toString(),
             receiverId: call.receiver.toString(),
-            status: call.status,
+            status: String(call.status),
             type: call.type,
         };
     };
-    const emitCallError = (message) => {
-        socket.emit("call:error", { message });
-    };
-    const isActiveCallStatus = (status) => status === "ringing" || status === "accepted";
+    const isCallParticipant = (callerId, receiverId) => userId === callerId || userId === receiverId;
     // ==========================================================
     // CREATE CALL HISTORY MESSAGE
     // ==========================================================
     const createCallHistoryMessage = async (params) => {
         const { callId, callerId, receiverId, type, status, duration = 0, } = params;
+        if (!mongoose_1.Types.ObjectId.isValid(callId) ||
+            !mongoose_1.Types.ObjectId.isValid(callerId) ||
+            !mongoose_1.Types.ObjectId.isValid(receiverId)) {
+            throw new Error("Invalid call history identifiers");
+        }
         const callObjectId = new mongoose_1.Types.ObjectId(callId);
         const callerObjectId = new mongoose_1.Types.ObjectId(callerId);
         const receiverObjectId = new mongoose_1.Types.ObjectId(receiverId);
-        // Prevent duplicate history messages for the same call.
+        // Avoid creating history twice for the same call.
         const existingMessage = await message_model_1.MessageModel.findOne({
             callId: callObjectId,
         });
@@ -97,11 +111,11 @@ const registerSocketHandlers = (io, socket) => {
             },
         });
         if (!conversation) {
-            console.warn(`No direct conversation found for call ${callId}. History was not created.`);
+            console.warn(`No direct conversation found for call ${callId}.`);
             return null;
         }
         const callLabel = type === "audio" ? "Audio call" : "Video call";
-        const safeDuration = Math.max(0, Math.floor(duration));
+        const safeDuration = Math.max(0, Math.floor(Number(duration) || 0));
         const minutes = Math.floor(safeDuration / 60);
         const seconds = safeDuration % 60;
         const formattedDuration = `${String(minutes).padStart(2, "0")}:` +
@@ -132,18 +146,22 @@ const registerSocketHandlers = (io, socket) => {
             });
         }
         catch (error) {
-            // A concurrent request may already have created this call history.
+            // Handles concurrent creation when a unique callId index exists.
             if (typeof error === "object" &&
                 error !== null &&
                 "code" in error &&
                 error.code === 11000) {
-                return message_model_1.MessageModel.findOne({ callId: callObjectId });
+                return message_model_1.MessageModel.findOne({
+                    callId: callObjectId,
+                });
             }
             throw error;
         }
         await conversation_model_1.ConversationModel.updateOne({ _id: conversation._id }, { $set: { lastMessage: createdMessage._id } });
-        const participantIds = [callerId, receiverId];
-        await (0, cache_service_1.invalidateUserConversationsCache)(participantIds);
+        await (0, cache_service_1.invalidateUserConversationsCache)([
+            callerId,
+            receiverId,
+        ]);
         const populatedMessage = await message_model_1.MessageModel.findById(createdMessage._id).populate("senderId", "_id phone name avatar bio isOnline lastSeen");
         if (!populatedMessage)
             return createdMessage;
@@ -160,9 +178,8 @@ const registerSocketHandlers = (io, socket) => {
                 lastSeen: sender.lastSeen ?? null,
             },
         };
-        // Deliver to both users, even if neither has this chat open.
-        io.to(`user:${callerId}`).emit("message:new", socketMessage);
-        io.to(`user:${receiverId}`).emit("message:new", socketMessage);
+        io.to(PERSONAL_ROOM(callerId)).emit("message:new", socketMessage);
+        io.to(PERSONAL_ROOM(receiverId)).emit("message:new", socketMessage);
         return createdMessage;
     };
     // ==========================================================
@@ -170,16 +187,16 @@ const registerSocketHandlers = (io, socket) => {
     // ==========================================================
     socket.on("message:send", async (payload) => {
         try {
-            const { conversationId, text = "", replyTo } = payload;
-            if (!conversationId) {
+            const { conversationId, text = "", replyTo } = payload ?? {};
+            if (!isValidObjectId(conversationId)) {
                 socket.emit("message:error", {
-                    message: "Conversation ID is required",
+                    message: "Valid conversation ID is required",
                 });
                 return;
             }
-            if (!mongoose_1.Types.ObjectId.isValid(conversationId)) {
+            if (typeof text !== "string") {
                 socket.emit("message:error", {
-                    message: "Invalid conversation ID",
+                    message: "Message text must be a string",
                 });
                 return;
             }
@@ -199,10 +216,10 @@ const registerSocketHandlers = (io, socket) => {
             }
             const message = await (0, message_service_1.createMessage)(userId, conversationId, text, replyTo, []);
             const conversation = await conversation_model_1.ConversationModel.findById(conversationId).select("participants");
-            if (!conversation)
+            if (!conversation) {
                 throw new Error("Conversation not found");
+            }
             const sender = message.senderId;
-            const socketMessage = message.toObject();
             const populatedSender = {
                 _id: sender._id,
                 phone: sender.phone,
@@ -214,17 +231,18 @@ const registerSocketHandlers = (io, socket) => {
             };
             const participantIds = conversation.participants.map((id) => id.toString());
             await (0, cache_service_1.invalidateUserConversationsCache)(participantIds);
-            for (const participantId of conversation.participants) {
-                io.to(`user:${participantId.toString()}`).emit("message:new", {
-                    ...socketMessage,
-                    senderId: populatedSender,
-                });
+            const socketMessage = {
+                ...message.toObject(),
+                senderId: populatedSender,
+            };
+            for (const participantId of participantIds) {
+                io.to(PERSONAL_ROOM(participantId)).emit("message:new", socketMessage);
             }
         }
         catch (error) {
             console.error("message:send error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error ? error.message : "Failed to send message",
+                message: getErrorMessage(error, "Failed to send message"),
             });
         }
     });
@@ -233,7 +251,7 @@ const registerSocketHandlers = (io, socket) => {
     // ==========================================================
     socket.on("message:reaction", async (payload) => {
         try {
-            const { messageId, emoji } = payload;
+            const { messageId, emoji } = payload ?? {};
             if (!messageId || !emoji) {
                 socket.emit("message:error", {
                     message: "Message ID and emoji are required",
@@ -245,9 +263,8 @@ const registerSocketHandlers = (io, socket) => {
             const targetUserId = typeof result.message.senderId === "string"
                 ? result.message.senderId
                 : result.message.senderId.toString();
-            const eventId = `${result.message._id.toString()}:${userId}:${Date.now()}`;
             const reactionPayload = {
-                eventId,
+                eventId: `${result.message._id.toString()}:${userId}:${Date.now()}`,
                 messageId: result.message._id.toString(),
                 conversationId,
                 action: result.action,
@@ -257,16 +274,14 @@ const registerSocketHandlers = (io, socket) => {
             };
             io.to(conversationId).emit("message:reaction:update", reactionPayload);
             if (targetUserId !== userId) {
-                io.to(`user:${targetUserId}`).emit("message:reaction:update", reactionPayload);
+                io.to(PERSONAL_ROOM(targetUserId)).emit("message:reaction:update", reactionPayload);
             }
-            console.log(`Reaction ${result.action}: ${emoji} on message ${messageId}`);
+            console.log(`Reaction ${result.action}: ${emoji} on ${messageId}`);
         }
         catch (error) {
             console.error("message:reaction error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error
-                    ? error.message
-                    : "Failed to update reaction",
+                message: getErrorMessage(error, "Failed to update reaction"),
             });
         }
     });
@@ -275,7 +290,7 @@ const registerSocketHandlers = (io, socket) => {
     // ==========================================================
     socket.on("message:delete", async (payload) => {
         try {
-            const { messageId } = payload;
+            const { messageId } = payload ?? {};
             if (!messageId) {
                 socket.emit("message:error", {
                     message: "Message ID is required",
@@ -289,12 +304,11 @@ const registerSocketHandlers = (io, socket) => {
                 await (0, cache_service_1.invalidateUserConversationsCache)(conversation.participants.map((id) => id.toString()));
             }
             io.to(conversationId).emit("message:deleted", deletedMessage);
-            console.log(`Message ${messageId} deleted`);
         }
         catch (error) {
             console.error("message:delete error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error ? error.message : "Failed to delete message",
+                message: getErrorMessage(error, "Failed to delete message"),
             });
         }
     });
@@ -303,20 +317,20 @@ const registerSocketHandlers = (io, socket) => {
     // ==========================================================
     socket.on("message:edit", async (payload) => {
         try {
-            const { messageId, text } = payload;
+            const { messageId, text } = payload ?? {};
             if (!messageId) {
                 socket.emit("message:error", {
                     message: "Message ID is required",
                 });
                 return;
             }
-            if (!text || !text.trim()) {
+            if (typeof text !== "string" || !text.trim()) {
                 socket.emit("message:error", {
                     message: "Message text is required",
                 });
                 return;
             }
-            const message = await (0, message_service_1.editMessage)(userId, messageId, text);
+            const message = await (0, message_service_1.editMessage)(userId, messageId, text.trim());
             const conversationId = message.conversationId.toString();
             const conversation = await conversation_model_1.ConversationModel.findById(conversationId).select("participants");
             if (conversation) {
@@ -327,15 +341,16 @@ const registerSocketHandlers = (io, socket) => {
         catch (error) {
             console.error("message:edit error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error ? error.message : "Failed to edit message",
+                message: getErrorMessage(error, "Failed to edit message"),
             });
         }
     });
     // ==========================================================
     // MESSAGE DELIVERED
     // ==========================================================
-    socket.on("message:delivered", async ({ messageId }) => {
+    socket.on("message:delivered", async (payload) => {
         try {
+            const { messageId } = payload ?? {};
             if (!messageId) {
                 socket.emit("message:error", {
                     message: "Message ID is required",
@@ -343,7 +358,7 @@ const registerSocketHandlers = (io, socket) => {
                 return;
             }
             const result = await (0, message_service_1.markMessageAsDelivered)(userId, messageId);
-            io.to(`user:${result.senderId}`).emit("message:delivery:update", {
+            io.to(PERSONAL_ROOM(result.senderId)).emit("message:delivery:update", {
                 messageId: result.messageId,
                 conversationId: result.conversationId,
                 userId: result.userId,
@@ -352,17 +367,16 @@ const registerSocketHandlers = (io, socket) => {
         catch (error) {
             console.error("message:delivered error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error
-                    ? error.message
-                    : "Failed to mark message as delivered",
+                message: getErrorMessage(error, "Failed to mark message as delivered"),
             });
         }
     });
     // ==========================================================
     // SINGLE MESSAGE READ
     // ==========================================================
-    socket.on("message:read", async ({ messageId }) => {
+    socket.on("message:read", async (payload) => {
         try {
+            const { messageId } = payload ?? {};
             if (!messageId) {
                 socket.emit("message:error", {
                     message: "Message ID is required",
@@ -375,7 +389,7 @@ const registerSocketHandlers = (io, socket) => {
             const senderId = typeof message.senderId === "string"
                 ? message.senderId
                 : message.senderId._id.toString();
-            io.to(`user:${senderId}`).emit("message:read:update", {
+            io.to(PERSONAL_ROOM(senderId)).emit("message:read:update", {
                 messageId: message._id.toString(),
                 conversationId,
                 userId,
@@ -384,22 +398,20 @@ const registerSocketHandlers = (io, socket) => {
         catch (error) {
             console.error("message:read error:", error);
             socket.emit("message:error", {
-                message: error instanceof Error
-                    ? error.message
-                    : "Failed to mark message as read",
+                message: getErrorMessage(error, "Failed to mark message as read"),
             });
         }
     });
     // ==========================================================
     // CONVERSATION READ
     // ==========================================================
-    socket.on("conversation:read", async ({ conversationId }) => {
+    socket.on("conversation:read", async (payload) => {
+        const { conversationId } = payload ?? {};
         try {
-            if (!conversationId ||
-                !mongoose_1.Types.ObjectId.isValid(conversationId) ||
+            if (!isValidObjectId(conversationId) ||
                 !mongoose_1.Types.ObjectId.isValid(userId)) {
                 socket.emit("conversation:error", {
-                    message: "Valid conversation ID and user ID are required",
+                    message: "Valid conversation ID is required",
                     conversationId,
                 });
                 return;
@@ -426,9 +438,13 @@ const registerSocketHandlers = (io, socket) => {
             const messageIds = unreadMessages.map((message) => message._id.toString());
             if (unreadMessages.length > 0) {
                 await message_model_1.MessageModel.updateMany({
-                    _id: { $in: unreadMessages.map((message) => message._id) },
+                    _id: {
+                        $in: unreadMessages.map((message) => message._id),
+                    },
                     readBy: { $nin: [userObjectId] },
-                }, { $addToSet: { readBy: userObjectId } });
+                }, {
+                    $addToSet: { readBy: userObjectId },
+                });
             }
             await (0, cache_service_1.invalidateUserConversationsCache)([userId]);
             socket.emit("conversation:read:update", {
@@ -442,7 +458,7 @@ const registerSocketHandlers = (io, socket) => {
                     .filter((senderId) => Boolean(senderId) && senderId !== userId)),
             ];
             for (const senderId of senderIds) {
-                io.to(`user:${senderId}`).emit("conversation:read:update", {
+                io.to(PERSONAL_ROOM(senderId)).emit("conversation:read:update", {
                     conversationId,
                     userId,
                     messageIds,
@@ -452,9 +468,7 @@ const registerSocketHandlers = (io, socket) => {
         catch (error) {
             console.error("conversation:read error:", error);
             socket.emit("conversation:error", {
-                message: error instanceof Error
-                    ? error.message
-                    : "Failed to mark conversation as read",
+                message: getErrorMessage(error, "Failed to mark conversation as read"),
                 conversationId,
             });
         }
@@ -462,9 +476,9 @@ const registerSocketHandlers = (io, socket) => {
     // ==========================================================
     // TYPING START / STOP
     // ==========================================================
-    socket.on("typing:start", async ({ conversationId }) => {
+    const handleTyping = async (conversationId, event) => {
         try {
-            if (!conversationId || !mongoose_1.Types.ObjectId.isValid(conversationId)) {
+            if (!isValidObjectId(conversationId)) {
                 socket.emit("message:error", {
                     message: "Valid conversation ID is required",
                 });
@@ -476,46 +490,34 @@ const registerSocketHandlers = (io, socket) => {
             const blocked = await isDirectConversationBlocked(conversationId, userId);
             if (blocked)
                 return;
-            socket.to(conversationId).emit("typing:start", {
+            socket.to(conversationId).emit(event, {
                 conversationId,
                 userId,
             });
         }
         catch (error) {
-            console.error("typing:start error:", error);
+            console.error(`${event} error:`, error);
         }
+    };
+    socket.on("typing:start", async (payload) => {
+        await handleTyping(payload?.conversationId, "typing:start");
     });
-    socket.on("typing:stop", async ({ conversationId }) => {
-        try {
-            if (!conversationId || !mongoose_1.Types.ObjectId.isValid(conversationId)) {
-                socket.emit("message:error", {
-                    message: "Valid conversation ID is required",
-                });
-                return;
-            }
-            const isMember = await (0, conversation_service_1.isConversationMember)(conversationId, userId);
-            if (!isMember)
-                return;
-            const blocked = await isDirectConversationBlocked(conversationId, userId);
-            if (blocked)
-                return;
-            socket.to(conversationId).emit("typing:stop", {
-                conversationId,
-                userId,
-            });
-        }
-        catch (error) {
-            console.error("typing:stop error:", error);
-        }
+    socket.on("typing:stop", async (payload) => {
+        await handleTyping(payload?.conversationId, "typing:stop");
     });
     // ==========================================================
     // WEBRTC CALL SIGNALING
     // ==========================================================
     // INITIATE CALL
-    socket.on("call:initiate", async ({ receiverId, type }) => {
+    socket.on("call:initiate", async (payload) => {
         try {
-            if (!receiverId || !mongoose_1.Types.ObjectId.isValid(receiverId)) {
+            const { receiverId, type } = payload ?? {};
+            if (!isValidObjectId(receiverId)) {
                 emitCallError("Valid receiver ID is required");
+                return;
+            }
+            if (!mongoose_1.Types.ObjectId.isValid(userId)) {
+                emitCallError("Invalid caller ID");
                 return;
             }
             if (receiverId === userId) {
@@ -526,24 +528,37 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call type must be audio or video");
                 return;
             }
-            if (!mongoose_1.Types.ObjectId.isValid(userId)) {
-                emitCallError("Invalid caller ID");
-                return;
-            }
+            const callerObjectId = new mongoose_1.Types.ObjectId(userId);
+            const receiverObjectId = new mongoose_1.Types.ObjectId(receiverId);
             const blocked = await block_model_1.BlockModel.exists({
                 $or: [
                     {
-                        blockerId: new mongoose_1.Types.ObjectId(userId),
-                        blockedId: new mongoose_1.Types.ObjectId(receiverId),
+                        blockerId: callerObjectId,
+                        blockedId: receiverObjectId,
                     },
                     {
-                        blockerId: new mongoose_1.Types.ObjectId(receiverId),
-                        blockedId: new mongoose_1.Types.ObjectId(userId),
+                        blockerId: receiverObjectId,
+                        blockedId: callerObjectId,
                     },
                 ],
             });
             if (blocked) {
                 emitCallError("You cannot call this user");
+                return;
+            }
+            // Prevent starting another call while either user has an
+            // existing ringing or accepted call.
+            const activeCall = await call_model_1.Call.findOne({
+                status: { $in: ["ringing", "accepted"] },
+                $or: [
+                    { caller: callerObjectId },
+                    { receiver: callerObjectId },
+                    { caller: receiverObjectId },
+                    { receiver: receiverObjectId },
+                ],
+            }).select("_id caller receiver status");
+            if (activeCall) {
+                emitCallError("You or the other user is already in an active call");
                 return;
             }
             const call = await call_service_1.callService.createCall({
@@ -552,21 +567,26 @@ const registerSocketHandlers = (io, socket) => {
                 type,
             });
             const callId = call._id.toString();
-            const payload = {
+            const callPayload = {
                 callId,
                 callerId: userId,
                 receiverId,
                 type,
                 status: "ringing",
             };
-            io.to(`user:${receiverId}`).emit("call:incoming", payload);
-            socket.emit("call:incoming", payload);
-            // If the call is still ringing after 30 seconds, mark it missed.
-            // updateCallStatus must atomically update only a ringing call.
+            io.to(PERSONAL_ROOM(receiverId)).emit("call:incoming", callPayload);
+            // Kept for compatibility with the existing frontend event flow.
+            socket.emit("call:incoming", callPayload);
+            // Miss the call only if it is still ringing after 30 seconds.
             setTimeout(async () => {
                 try {
+                    const currentCall = await getCallDetails(callId);
+                    if (!currentCall || currentCall.status !== "ringing") {
+                        return;
+                    }
+                    // IMPORTANT: updateCallStatus should atomically update only
+                    // calls whose current status is "ringing".
                     const missedCall = await call_service_1.callService.updateCallStatus(callId, "missed");
-                    // If accepted, rejected or cancelled already, nothing is changed.
                     if (!missedCall)
                         return;
                     await createCallHistoryMessage({
@@ -584,8 +604,8 @@ const registerSocketHandlers = (io, socket) => {
                         endedBy: "system",
                         duration: 0,
                     };
-                    io.to(`user:${userId}`).emit("call:ended", missedPayload);
-                    io.to(`user:${receiverId}`).emit("call:ended", missedPayload);
+                    io.to(PERSONAL_ROOM(userId)).emit("call:ended", missedPayload);
+                    io.to(PERSONAL_ROOM(receiverId)).emit("call:ended", missedPayload);
                     console.log(`Call ${callId} marked as missed`);
                 }
                 catch (error) {
@@ -596,12 +616,13 @@ const registerSocketHandlers = (io, socket) => {
         }
         catch (error) {
             console.error("call:initiate error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to initiate call");
+            emitCallError(getErrorMessage(error, "Failed to initiate call"));
         }
     });
     // SEND WEBRTC OFFER
-    socket.on("call:offer", async ({ callId, receiverId, offer }) => {
+    socket.on("call:offer", async (payload) => {
         try {
+            const { callId, receiverId, offer } = payload ?? {};
             if (!callId || !receiverId || !offer) {
                 emitCallError("Call ID, receiver ID and offer are required");
                 return;
@@ -611,7 +632,8 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            if (details.callerId !== userId || details.receiverId !== receiverId) {
+            if (details.callerId !== userId ||
+                details.receiverId !== receiverId) {
                 emitCallError("You are not authorized to send this offer");
                 return;
             }
@@ -619,7 +641,7 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("This call is no longer active");
                 return;
             }
-            io.to(`user:${details.receiverId}`).emit("call:offer", {
+            io.to(PERSONAL_ROOM(details.receiverId)).emit("call:offer", {
                 callId,
                 callerId: userId,
                 offer,
@@ -627,12 +649,13 @@ const registerSocketHandlers = (io, socket) => {
         }
         catch (error) {
             console.error("call:offer error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to send call offer");
+            emitCallError(getErrorMessage(error, "Failed to send call offer"));
         }
     });
     // SEND WEBRTC ANSWER
-    socket.on("call:answer", async ({ callId, callerId, answer }) => {
+    socket.on("call:answer", async (payload) => {
         try {
+            const { callId, callerId, answer } = payload ?? {};
             if (!callId || !callerId || !answer) {
                 emitCallError("Call ID, caller ID and answer are required");
                 return;
@@ -642,7 +665,8 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            if (details.receiverId !== userId || details.callerId !== callerId) {
+            if (details.receiverId !== userId ||
+                details.callerId !== callerId) {
                 emitCallError("You are not authorized to answer this call");
                 return;
             }
@@ -650,7 +674,7 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("The call must be accepted before answering");
                 return;
             }
-            io.to(`user:${details.callerId}`).emit("call:answer", {
+            io.to(PERSONAL_ROOM(details.callerId)).emit("call:answer", {
                 callId,
                 receiverId: userId,
                 answer,
@@ -658,12 +682,13 @@ const registerSocketHandlers = (io, socket) => {
         }
         catch (error) {
             console.error("call:answer error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to send call answer");
+            emitCallError(getErrorMessage(error, "Failed to send call answer"));
         }
     });
     // FORWARD ICE CANDIDATE
-    socket.on("call:ice-candidate", async ({ callId, targetUserId, candidate }) => {
+    socket.on("call:ice-candidate", async (payload) => {
         try {
+            const { callId, targetUserId, candidate } = payload ?? {};
             if (!callId || !targetUserId || !candidate) {
                 emitCallError("Call ID, target user ID and candidate are required");
                 return;
@@ -677,20 +702,18 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("This call is no longer active");
                 return;
             }
-            const otherParticipantId = details.callerId === userId
-                ? details.receiverId
-                : details.receiverId === userId
-                    ? details.callerId
-                    : null;
-            if (!otherParticipantId) {
+            if (!isCallParticipant(details.callerId, details.receiverId)) {
                 emitCallError("You are not a participant in this call");
                 return;
             }
+            const otherParticipantId = details.callerId === userId
+                ? details.receiverId
+                : details.callerId;
             if (targetUserId !== otherParticipantId) {
                 emitCallError("Invalid ICE candidate recipient");
                 return;
             }
-            io.to(`user:${otherParticipantId}`).emit("call:ice-candidate", {
+            io.to(PERSONAL_ROOM(otherParticipantId)).emit("call:ice-candidate", {
                 callId,
                 senderId: userId,
                 candidate,
@@ -698,14 +721,13 @@ const registerSocketHandlers = (io, socket) => {
         }
         catch (error) {
             console.error("call:ice-candidate error:", error);
-            emitCallError(error instanceof Error
-                ? error.message
-                : "Failed to send ICE candidate");
+            emitCallError(getErrorMessage(error, "Failed to send ICE candidate"));
         }
     });
     // ACCEPT CALL
-    socket.on("call:accept", async ({ callId, callerId }) => {
+    socket.on("call:accept", async (payload) => {
         try {
+            const { callId, callerId } = payload ?? {};
             if (!callId || !callerId) {
                 emitCallError("Call ID and caller ID are required");
                 return;
@@ -715,7 +737,8 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            if (details.receiverId !== userId || details.callerId !== callerId) {
+            if (details.receiverId !== userId ||
+                details.callerId !== callerId) {
                 emitCallError("You are not authorized to accept this call");
                 return;
             }
@@ -728,23 +751,24 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("This call can no longer be accepted");
                 return;
             }
-            const payload = {
+            const callPayload = {
                 callId,
                 callerId: details.callerId,
                 receiverId: userId,
             };
-            io.to(`user:${details.callerId}`).emit("call:accepted", payload);
-            socket.emit("call:accepted", payload);
+            io.to(PERSONAL_ROOM(details.callerId)).emit("call:accepted", callPayload);
+            socket.emit("call:accepted", callPayload);
             console.log(`Call ${callId} accepted by ${userId}`);
         }
         catch (error) {
             console.error("call:accept error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to accept call");
+            emitCallError(getErrorMessage(error, "Failed to accept call"));
         }
     });
     // REJECT CALL
-    socket.on("call:reject", async ({ callId, callerId }) => {
+    socket.on("call:reject", async (payload) => {
         try {
+            const { callId, callerId } = payload ?? {};
             if (!callId || !callerId) {
                 emitCallError("Call ID and caller ID are required");
                 return;
@@ -754,7 +778,8 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            if (details.receiverId !== userId || details.callerId !== callerId) {
+            if (details.receiverId !== userId ||
+                details.callerId !== callerId) {
                 emitCallError("You are not authorized to reject this call");
                 return;
             }
@@ -775,23 +800,24 @@ const registerSocketHandlers = (io, socket) => {
                 status: "rejected",
                 duration: 0,
             });
-            const payload = {
+            const callPayload = {
                 callId,
                 callerId: details.callerId,
                 receiverId: userId,
             };
-            io.to(`user:${details.callerId}`).emit("call:rejected", payload);
-            socket.emit("call:rejected", payload);
+            io.to(PERSONAL_ROOM(details.callerId)).emit("call:rejected", callPayload);
+            socket.emit("call:rejected", callPayload);
             console.log(`Call ${callId} rejected by ${userId}`);
         }
         catch (error) {
             console.error("call:reject error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to reject call");
+            emitCallError(getErrorMessage(error, "Failed to reject call"));
         }
     });
     // CANCEL OUTGOING CALL
-    socket.on("call:cancel", async ({ callId, receiverId }) => {
+    socket.on("call:cancel", async (payload) => {
         try {
+            const { callId, receiverId } = payload ?? {};
             if (!callId || !receiverId) {
                 emitCallError("Call ID and receiver ID are required");
                 return;
@@ -801,7 +827,8 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            if (details.callerId !== userId || details.receiverId !== receiverId) {
+            if (details.callerId !== userId ||
+                details.receiverId !== receiverId) {
                 emitCallError("You are not authorized to cancel this call");
                 return;
             }
@@ -822,23 +849,24 @@ const registerSocketHandlers = (io, socket) => {
                 status: "cancelled",
                 duration: 0,
             });
-            const payload = {
+            const callPayload = {
                 callId,
                 callerId: userId,
                 receiverId: details.receiverId,
             };
-            io.to(`user:${details.receiverId}`).emit("call:cancelled", payload);
-            socket.emit("call:cancelled", payload);
+            io.to(PERSONAL_ROOM(details.receiverId)).emit("call:cancelled", callPayload);
+            socket.emit("call:cancelled", callPayload);
             console.log(`Call ${callId} cancelled by ${userId}`);
         }
         catch (error) {
             console.error("call:cancel error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to cancel call");
+            emitCallError(getErrorMessage(error, "Failed to cancel call"));
         }
     });
     // END CALL
-    socket.on("call:end", async ({ callId, targetUserId }) => {
+    socket.on("call:end", async (payload) => {
         try {
+            const { callId, targetUserId } = payload ?? {};
             if (!callId || !targetUserId) {
                 emitCallError("Call ID and target user ID are required");
                 return;
@@ -848,15 +876,13 @@ const registerSocketHandlers = (io, socket) => {
                 emitCallError("Call not found");
                 return;
             }
-            const otherParticipantId = details.callerId === userId
-                ? details.receiverId
-                : details.receiverId === userId
-                    ? details.callerId
-                    : null;
-            if (!otherParticipantId) {
+            if (!isCallParticipant(details.callerId, details.receiverId)) {
                 emitCallError("You are not a participant in this call");
                 return;
             }
+            const otherParticipantId = details.callerId === userId
+                ? details.receiverId
+                : details.callerId;
             if (targetUserId !== otherParticipantId) {
                 emitCallError("Invalid call recipient");
                 return;
@@ -878,30 +904,43 @@ const registerSocketHandlers = (io, socket) => {
                 status: "completed",
                 duration: call.duration ?? 0,
             });
-            const payload = {
+            const callPayload = {
                 callId,
                 callerId: details.callerId,
                 receiverId: details.receiverId,
                 endedBy: userId,
                 duration: call.duration ?? 0,
             };
-            io.to(`user:${otherParticipantId}`).emit("call:ended", payload);
-            socket.emit("call:ended", payload);
+            io.to(PERSONAL_ROOM(otherParticipantId)).emit("call:ended", callPayload);
+            socket.emit("call:ended", callPayload);
             console.log(`Call ${callId} ended by ${userId}`);
         }
         catch (error) {
             console.error("call:end error:", error);
-            emitCallError(error instanceof Error ? error.message : "Failed to end call");
+            emitCallError(getErrorMessage(error, "Failed to end call"));
         }
     });
     // ==========================================================
     // DISCONNECT
     // ==========================================================
-    socket.on("disconnect", (reason) => {
+    socket.on("disconnect", async (reason) => {
         console.log(`Socket disconnected: ${socket.id}`, `userId: ${userId}`, `reason: ${reason}`);
-        (0, user_service_1.setUserOffline)(userId).catch((error) => {
-            console.error("Failed to set user offline:", error);
-        });
+        try {
+            // Socket.IO removes the disconnected socket from its rooms
+            // before this callback. Check whether other tabs/devices remain.
+            const remainingSockets = await io
+                .in(PERSONAL_ROOM(userId))
+                .fetchSockets();
+            if (remainingSockets.length > 0) {
+                console.log(`User ${userId} remains online (${remainingSockets.length} socket(s))`);
+                return;
+            }
+            await (0, user_service_1.setUserOffline)(userId);
+            console.log(`User ${userId} is now offline`);
+        }
+        catch (error) {
+            console.error("Failed to update user offline status:", error);
+        }
     });
 };
 exports.registerSocketHandlers = registerSocketHandlers;
