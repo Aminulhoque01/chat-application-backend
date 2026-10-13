@@ -53,5 +53,6 @@ export interface IMessage {
   isForwarded?: boolean;
 
   forwardedFrom?: Types.ObjectId | null;
+  callId?: Types.ObjectId | null;
 }
 

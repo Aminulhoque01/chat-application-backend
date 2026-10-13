@@ -1,9 +1,6 @@
 import { Schema, model } from "mongoose";
 
-import {
-  IAttachment,
-  IMessage,
-} from "./message.interface";
+import { IAttachment, IMessage } from "./message.interface";
 
 const attachmentSchema = new Schema<IAttachment>(
   {
@@ -150,6 +147,12 @@ const messageSchema = new Schema<IMessage>(
       ref: "Message",
       default: null,
     },
+
+    callId: {
+      type: Schema.Types.ObjectId,
+      ref: "Call",
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -171,13 +174,9 @@ messageSchema.pre("validate", function (next) {
     return next();
   }
 
-  const hasText =
-    typeof this.text === "string" &&
-    this.text.trim().length > 0;
+  const hasText = typeof this.text === "string" && this.text.trim().length > 0;
 
-  const hasAttachments =
-    this.attachments &&
-    this.attachments.length > 0;
+  const hasAttachments = this.attachments && this.attachments.length > 0;
 
   /*
    * System message must contain text.
@@ -187,9 +186,7 @@ messageSchema.pre("validate", function (next) {
    */
   if (this.type === "system") {
     if (!hasText) {
-      return next(
-        new Error("System message must contain text"),
-      );
+      return next(new Error("System message must contain text"));
     }
 
     return next();
@@ -200,17 +197,14 @@ messageSchema.pre("validate", function (next) {
    * text OR attachment
    */
   if (!hasText && !hasAttachments) {
-    return next(
-      new Error(
-        "Message must contain text or attachment",
-      ),
-    );
+    return next(new Error("Message must contain text or attachment"));
   }
 
   next();
 });
 
-export const MessageModel = model<IMessage>(
-  "Message",
-  messageSchema,
-);
+
+
+export const MessageModel = model<IMessage>("Message", messageSchema);
+
+

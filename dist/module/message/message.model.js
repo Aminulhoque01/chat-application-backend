@@ -122,6 +122,11 @@ const messageSchema = new mongoose_1.Schema({
         ref: "Message",
         default: null,
     },
+    callId: {
+        type: mongoose_1.Schema.Types.ObjectId,
+        ref: "Call",
+        default: null,
+    },
 }, {
     timestamps: true,
 });
@@ -139,10 +144,8 @@ messageSchema.pre("validate", function (next) {
     if (this.isDeleted) {
         return next();
     }
-    const hasText = typeof this.text === "string" &&
-        this.text.trim().length > 0;
-    const hasAttachments = this.attachments &&
-        this.attachments.length > 0;
+    const hasText = typeof this.text === "string" && this.text.trim().length > 0;
+    const hasAttachments = this.attachments && this.attachments.length > 0;
     /*
      * System message must contain text.
      *
